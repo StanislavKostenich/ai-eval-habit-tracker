@@ -1,0 +1,37 @@
+# Root-level .dockerignore.
+#
+# Both Dockerfiles (backend + frontend) are built with the repository ROOT as
+# the build context (docker-compose sets build.context to "."), so THIS file
+# is what filters the context — a per-workspace .dockerignore does NOT apply
+# when the context is the root. Keep node_modules and build artifacts out of
+# the context so builds are fast and nothing local leaks in.
+
+# --- node_modules (installed fresh inside the image from the lockfile) ---
+node_modules
+backend/node_modules
+frontend/node_modules
+
+# --- local build output (rebuilt in the builder stages) ---
+dist
+backend/dist
+frontend/dist
+
+# --- local dev database (never baked into an image) ---
+backend/data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- env files / secrets ---
+.env
+.env.*
+!*.env.example
+
+# --- VCS / OS / docs / notes ---
+.git
+.gitignore
+.DS_Store
+docs
+REPORT.md
+README.md

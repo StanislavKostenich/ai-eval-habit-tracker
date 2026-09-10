@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // NodeNext so fastify v4's `export = fastify` + the @fastify/session
+    // `declare module 'fastify'` augmentation both resolve and merge correctly.
+    // For a `"type": "module"` package, NodeNext emits ESM with explicit `.js`
+    // specifiers. (Node16 breaks the @fastify/session module augmentation,
+    // dropping FastifyInstance methods — do not change to Node16.)
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "outDir": "dist",
+    "noEmit": false,
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

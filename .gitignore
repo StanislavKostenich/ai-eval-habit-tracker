@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+backend/data/
+frontend/playwright-report/
+test-results/
+.DS_Store
+# local verification screenshots (throwaway)
+frontend/screenshots/
+*.png
+# Playwright MCP output
+.playwright-mcp/
+# vim swap files
+*.swp
+*.swo

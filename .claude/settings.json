@@ -1,0 +1,55 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(docker compose:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(node:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-$PWD}\" || exit 0; f=$(jq -r '.tool_input.file_path'); case \"$f\" in *frontend*) ws=frontend ;; *backend*) ws=backend ;; *) exit 0 ;; esac; if [ -f \"$ws/tsconfig.json\" ]; then (cd \"$ws\" && npx tsc --noEmit 2>&1 | head -40) || true; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-$PWD}\" || exit 0; f=$(jq -r '.tool_input.file_path'); case \"$f\" in *frontend*) case \"$f\" in *.tsx|*.ts) grep -rn \"localhost:3000\" frontend/src/ | head -5; n=$(grep -rn \"function getTodayISO\\|const getTodayISO\" frontend/src/ 2>/dev/null | wc -l | tr -d ' '); [ \"$n\" -gt 1 ] && echo \"spec-convention: multiple getTodayISO() definition sites (must be 1)\";; esac;; *backend*) case \"$f\" in *.ts) grep -rn \"403\" backend/src/routes/ backend/src/app.ts | head -5; grep -rn \"&&\" backend/src/ --include='*.ts' | grep -E \"eq\\(\" | head -5;; esac;; esac"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-$PWD}/.claude/hooks/context-guard.py\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "typescript-lsp@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "github@claude-plugins-official": true
+  }
+}

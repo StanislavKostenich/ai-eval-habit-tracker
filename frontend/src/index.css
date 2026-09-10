@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-paper font-sans text-ink antialiased;
+  }
+  /* Visible keyboard focus on every interactive element (SPEC §9 polish). */
+  :focus-visible {
+    outline: none;
+  }
+}
+
+@layer components {
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+      transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2
+      focus-visible:ring-offset-paper disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-evergreen text-white hover:bg-evergreen-deep;
+  }
+  .btn-secondary {
+    @apply btn border border-line bg-surface text-ink hover:bg-paper;
+  }
+  .btn-ghost {
+    @apply btn text-ink-soft hover:bg-ink/[0.06] hover:text-ink;
+  }
+  .btn-danger {
+    @apply btn bg-danger text-white hover:bg-danger/90;
+  }
+  .btn-danger-ghost {
+    @apply btn text-danger hover:bg-danger-soft;
+  }
+
+  /* Cards */
+  .card {
+    @apply rounded-xl border border-line bg-surface shadow-card;
+  }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  /* Form controls */
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink
+      placeholder:text-ink-faint transition-colors duration-150
+      focus:border-focus focus:outline-none focus:ring-2 focus:ring-focus/20;
+  }
+  .input-error {
+    @apply border-danger focus:border-danger focus:ring-danger/20;
+  }
+  .label {
+    @apply mb-1 block text-sm font-medium text-ink;
+  }
+  .field-error {
+    @apply mt-1 text-xs font-medium text-danger;
+  }
+
+  /* Toast entrance (motion answers the WS event) */
+  .animate-toast {
+    @apply animate-toast-in;
+  }
+  .animate-sheet {
+    @apply animate-sheet-in;
+  }
+  .animate-fade {
+    @apply animate-fade-in;
+  }
+}

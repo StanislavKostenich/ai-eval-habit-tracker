@@ -1,0 +1,74 @@
+services:
+  backend:
+    # Build context is the repo root, NOT ./backend. This is an npm workspaces
+    # monorepo: a single package-lock.json lives at the root (npm ci must run
+    # from the root), and backend/tsconfig.json extends ../tsconfig.base.json,
+    # which only resolves when the root is the context. The root .dockerignore
+    # keeps node_modules/dist/data/.env out of the context.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # The OAuth provider secrets (GOOGLE_*/GITHUB_*) live in .env. Everything
+    # else the backend needs is set explicitly below.
+    env_file: .env
+    environment:
+      # Hard-fail the compose run immediately if SESSION_SECRET is unset.
+      # (The backend additionally refuses to boot in production without a
+      # 32+ char secret — see src/app.ts.)
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
+      - NODE_ENV=production
+      - PORT=3000
+      # Overrides DATABASE_PATH from .env: persist on the named volume below so
+      # SQLite data + sessions survive container restarts. The session store and
+      # the app data share this single SQLite file (see backend/src/app.ts).
+      - DATABASE_PATH=/data/habits.db
+      # Built from these so OAuth callback/redirect URIs are correct in Docker
+      # (never hardcoded localhost). FRONTEND_URL is only used for post-login
+      # redirects; the internal URL is fine because the browser hits the nginx
+      # proxy, not this address directly.
+      - BACKEND_URL=http://backend:3000
+      - FRONTEND_URL=http://frontend:8080
+    volumes:
+      - habits-data:/data
+    # NOT exposed publicly. Only reachable on the internal network (frontend's
+    # nginx proxies to it; healthcheck hits localhost:3000 inside the container).
+    networks:
+      - internal
+    healthcheck:
+      # Any NON-5xx response counts as healthy; unreachable / 5xx = unhealthy.
+      # Uses a node one-liner (http.get) rather than curl, which is not present
+      # in the node:20-slim runtime image. Exit code: 1 on any status >= 500 or
+      # on a network error, 0 otherwise (a 401 from /api/auth/me with no session
+      # is a non-5xx -> healthy, which is the correct signal that the server is
+      # actually listening). This replaces the skeleton's `|| true`, which made
+      # the check pass unconditionally.
+      test: ["CMD-SHELL", "node -e \"const r=require('http').get('http://localhost:3000/api/auth/me',{timeout:2000},res=>{process.exit(res.statusCode>=500?1:0)});r.on('error',()=>process.exit(1));r.on('timeout',()=>{r.destroy();process.exit(1)});\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    # Same root-context reasoning as backend (workspace root + single lockfile).
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:80"
+    # Wait until the backend passes its healthcheck before starting nginx.
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+
+volumes:
+  # Holds the SQLite DB (app data + session store share /data/habits.db).
+  habits-data:
+
+networks:
+  internal:
+    # internal: true -> no route to the outside world. Only the frontend's
+    # published 8080 port is reachable from the host; the backend has no
+    # published port of its own.
+    internal: true
