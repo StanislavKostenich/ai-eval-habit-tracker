@@ -1,3 +1,4 @@
+```markdown
 # Gateway `usage` Regression — Debug Plan & Gateway-Side Fix Specification
 
 **Date:** 2026-09-11 · **Gateway:** `pilot-gateway.ai.eleks-demo.com` (black box to the client)
@@ -200,7 +201,7 @@ These are **not** the fix (the fix is GW-1), but they make the client correct *o
 
 1. **Keep `context-guard.py` preferring real usage.** It already does; no change needed. Optionally, when it detects `usage:0` on the *last N* assistant messages (a sustained zero run, not a single zero), emit a distinct "usage telemetry lost — auto-compact is blind, compact early" message so the user knows the safety net is down.
 2. **Extend `probe_overflow.js`** with a **sustained-leg**: fire K small requests in a row (simulating a session) and assert the *last* one still has non-zero usage — to catch the "one-shot real, sustained zero" split that the current single FIT leg misses.
-3. **No change to `CLAUDE_CODE_*` settings.** They are already correct (S-2). Do not lower the auto-compact window further to "compensate" for `usage:0` — that only trades a 400 for overly-aggressive compaction, and it masks the real bug.
+3. **No change to `CLAUDE_CODE_`* settings.** They are already correct (S-2). Do not lower the auto-compact window further to "compensate" for `usage:0` — that only trades a 400 for overly-aggressive compaction, and it masks the real bug.
 
 ---
 
@@ -236,7 +237,7 @@ after-comparison a clean baseline.
 
 ### S-3.3 diagnostic header
 
-❌ **Does not exist.** OVER 400 headers: `server`, `date`, `content-type`, `content-length`, `connection`, `x-request-id`, `x-content-type-options`, `strict-transport-security`. Only `x-ai-policy-*` headers (route/reason/provider/model) appear on **200** responses. No `X-Gateway-Usage-Diagnostic`, no `?diagnostic=1` flag honored.
+❌ **Does not exist.** OVER 400 headers: `server`, `date`, `content-type`, `content-length`, `connection`, `x-request-id`, `x-content-type-options`, `strict-transport-security`. Only `x-ai-policy-`* headers (route/reason/provider/model) appear on **200** responses. No `X-Gateway-Usage-Diagnostic`, no `?diagnostic=1` flag honored.
 
 ### What is already working (pre-existing, not part of this fix)
 
@@ -272,10 +273,62 @@ PY
 
 **After the Monday 09-14 fix lands, re-run all three.** The acceptance gate (§6) is met only when the session-stream audit flips to **non-zero** (GW-1) AND the OVER body carries the arithmetic (GW-3) AND — ideally — a diagnostic header appears (GW-2). The tokenizer drift (GW-4) is the one item the team's two-part fix (RunPod `--tokenizer` + Gateway-image embed) is expected to close; verify by re-running the OVER payload and confirming the count is **stable across days**, not just non-zero.
 
+## 6.6 Local GX-10 baseline verification (2026-09-11, ~17:30 UTC)
+
+Same §3 Phase A methodology, run against the **local** GX-10 stack instead of the black-box
+remote gateway — to answer *"does the local path have the same `usage:0` / context-window issue?"*
+
+**Local chain** (no `pilot-gateway.ai.eleks-demo.com` anywhere in it):
+Claude Code → repo proxy `server/proxy/app.py` (`127.0.0.1:18080`) → LiteLLM
+(`127.0.0.1:4000`, `config/gx10_litellm_tierb.yaml`, `openai/qwen38-27b`) → vLLM
+(`127.0.0.1:8000`, `Qwen/Qwen3.8-27B-FP8` served as `qwen38-27b`, `--max-model-len 160000`).
+
+**Conclusion: the local stack does NOT exhibit the remote gateway's `usage:0` regression.**
+Real usage is present and correct on both the one-shot and the sustained-session paths.
+
+### Hypothesis disposition (Phase A, local)
+
+| # | Hypothesis | Local result |
+|---|---|---|
+| H1 | Streaming drops usage | ❌ **Ruled out** — stream == non-stream on an identical payload (both `input_tokens=1557`); the terminal `message_delta` SSE event carries real non-zero `usage` at every synthetic turn tested (1/20/60/120/200/400 → 62/792/2442/3494/22,658/25,106). |
+| H2 | Prompt-caching path zeroes usage | ❌ **Not observed** — prefix caching is *on* (`--enable-prefix-caching`, `--kv-cache-dtype fp8`) yet usage stays real; cached prefix is charged as `cache_read_input_tokens` (53,312 observed on a live message), never dropped to 0. |
+| H3 | Session/length-dependent zeroing | ❌ **Ruled out** — usage is real at 400 turns / ~25k input tokens; no zero run appears as length grows. |
+| H4 | Time/canary (intermittent) | ❌ **Not observed** — current-session transcript audit is 13/13 non-zero; the one local zero-heavy file (09-08, `55ba1950`, 2/37) is errored/cancelled turns (`output_tokens:0`, ms-apart duplicates) — client aborts defaulting to 0, not telemetry loss. |
+| H5 | Model-routed (a broken instance) | n/a — single local vLLM instance, no per-instance routing to distinguish. |
+
+### GW-1…GW-4, local
+
+| Req | Local status | Evidence |
+|---|---|---|
+| **GW-1** real usage on every response (incl. streaming terminal) | ✅ **Pass** — 0 zeros | Current session 13/13 non-zero; synthetic streaming ladder non-zero at every rung. |
+| **GW-2** preflight count == returned usage | ✅ **Pass** (single static tokenizer) | Stream and non-stream return the identical count on the identical payload; preflight and returned `usage` derive from the one vLLM tokenizer. No divergence observed. |
+| **GW-3** 400 body carries the arithmetic | ✅ **Pass** — better than the remote rewrite | Forced OVER (`max_tokens:160000` + 71-char prompt) → HTTP 400 body carries the raw vLLM arithmetic verbatim: *"maximum context length is 160000 tokens… requested 160000 output tokens… prompt contains 71 characters"*. The numbers are present, not hidden behind a humanized rewrite. |
+| **GW-4** stable tokenizer | ✅ **Effectively holds** | Static in-process vLLM tokenizer — no cold-start race, no pod restart, no day-to-day drift. (GW-4's remote failure mode was a pod cold-start race; the local single-process server has no such race.) |
+
+**GW-5** (`gpt-5-5` identity gate): not applicable — no `gpt-5-5` tier is routed on the local stack.
+
+### Probe fingerprint (reproducible, safe to re-run)
+
+- **GW-1 / H1 ladder:** synthetic `/v1/messages` one-shots at 1/20/60/120/200/400 turns, `stream:true`, asserting non-zero `usage.input_tokens` in the terminal `message_delta`.
+- **Stream vs non-stream parity:** identical payload sent both ways; assert `usage.input_tokens` equal (H1).
+- **GW-3 OVER leg:** `max_tokens:160000` + 71-char prompt → expect HTTP 400 whose body contains `maximum context length is 160000 tokens`. *(Intentional 400 — this is the fingerprint the 17:31:19 LiteLLM `ContextWindowExceededError` log line corresponds to; the `POST /v1/messages 200` immediately after is the next normal turn.)*
+
+### Divergence from the remote (worth recording, not a defect)
+
+| Item | Remote gateway | Local GX-10 |
+|---|---|---|
+| Served window | 131,072 | **160,000** (`--max-model-len 160000`) |
+| `usage:0` regression | Yes (pod tokenizer cold-start race) | **No** |
+| Client window env | anchored to 131,072 | still gateway-era: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` ≈ 131,072, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` → ~26% conservative vs the real 160k (safe, just compacts early). Aligning to `160000`/`145000` would use the full served window. |
+| Proxy log gap | — | repo proxy `logs/requests.jsonl` records `prompt_tokens:0` for streaming `/v1/messages` (a **logging** gap in the proxy's own line, not the response — the client still receives real usage). Non-stream lines record the real count. |
+
 ## 7. Open questions for the gateway owners
 
 1. Is `usage` populated on the **streaming** terminal event today, or only non-stream? (This is the single most likely cause — H1.) **Update 09-11:** the gateway team's own answer (findings §K) supersedes H1 — the root cause is a **tokenizer availability race** on the RunPod pod (cold start → preflight count falls back to 0), not the streaming path. The Phase A non-stream-vs-stream probe is now only needed to *confirm* the race is upstream of the response path.
 2. Is the zero a **regression from a specific deploy** (H4) or a **code path** (H1/H2)? A deploy timestamp around the 2026-09-10 → 09-11 window would narrow it fast.
 3. Can the diagnostic header (S-3.3) be added behind a flag for this evaluation tenant specifically, to unblock verification without a full rollout?
 4. Is the `gpt-5-5` 403 (GW-5) related to the same identity/policy change, and is a corrected token available?
+
+
+```
 
