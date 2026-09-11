@@ -1,9 +1,9 @@
 # 🎯 Habit Tracker with Streaks
 
-[![Node.js](https://img.shields.io/badge/Node.js-22-green?style=flat-square)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-20-green?style=flat-square)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?style=flat-square)](https://www.typescriptlang.org)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?style=flat-square)](./DOCKER.md)
-[![Tests](https://img.shields.io/badge/Tests-49/49-brightgreen?style=flat-square)](./backend/tests)
+[![Tests](https://img.shields.io/badge/Tests-backend%20suite-brightgreen?style=flat-square)](./backend/tests)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](./LICENSE)
 
 Full-stack MVP habit tracking app with daily check-ins, streak calculation, single sign-on (SSO) authentication, and real-time WebSocket milestone notifications. Built with Node.js, React, and SQLite.
@@ -31,14 +31,14 @@ Other deployment options:
 
 ## ✨ Features
 
-- **Multi-user SSO** — Log in with Google or GitHub
-- **Create & manage habits** — Add, edit, pause, and archive habits
-- **Daily check-ins** — Track daily progress with status enforcement
+- **Multi-user SSO** — Log in with Google, GitHub, or Demo Login (for development)
+- **Create & manage habits** — Add, edit, pause, and archive habits with full status validation
+- **Daily check-ins** — Track daily progress; one check-in per day, today only (UTC)
 - **Streak calculation** — Current streak, best streak, and total check-ins
-- **Real-time notifications** — WebSocket-driven milestone alerts for 3, 7, and 30-day streaks
-- **Search & filter** — Find habits by name and filter by status or completion
-- **Responsive design** — Works on desktop and mobile
-- **Automated tests** — Comprehensive test suite with 9 test scenarios
+- **Real-time milestone notifications** — WebSocket-driven alerts for 3, 7, and 30-day streaks with acknowledgment
+- **Search & filter** — Find habits by name/description and filter by status or completion
+- **Responsive design** — Desktop and mobile layouts
+- **Automated test suite** — Vitest backend tests covering auth, habits, check-ins, streaks, rate limiting, and WebSocket milestone engine
 
 ## 📋 Table of Contents
 
@@ -64,13 +64,13 @@ Other deployment options:
 | **Backend**   | Fastify 4                                   |
 | **Database**  | SQLite via `better-sqlite3`                 |
 | **ORM**       | Drizzle ORM                                 |
-| **Auth**      | Passport.js (Google + GitHub strategies)    |
-| **Sessions**  | `@fastify/session` + `connect-sqlite3`      |
+| **Auth**      | Hand-rolled OAuth2 (Google + GitHub via `fetch`) + Demo Login |
+| **Sessions**  | `@fastify/session` + `connect-sqlite3` (SQLite-backed) |
 | **WebSocket** | `@fastify/websocket`                        |
 | **Frontend**  | React 18 + Vite                             |
-| **UI**        | Tailwind CSS + shadcn/ui                    |
+| **UI**        | Tailwind CSS (utility-first)                |
 | **State**     | TanStack Query v5                           |
-| **Testing**   | Vitest + Supertest                          |
+| **Testing**   | Vitest + `ws` WebSocket client              |
 
 ---
 
@@ -203,16 +203,23 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable              | Description                                         | Example                        |
-|-----------------------|-----------------------------------------------------|--------------------------------|
-| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 Client ID                          | `abc123.apps.googleusercontent.com` |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret                      | `secret_key_xyz`              |
-| `GITHUB_CLIENT_ID`    | GitHub OAuth App Client ID                          | `abc123xyz`                   |
-| `GITHUB_CLIENT_SECRET` | GitHub OAuth App Client Secret                      | `secret_key_xyz`              |
-| `SESSION_SECRET`      | Secret for session encryption (32+ random chars)    | see below                     |
-| `DATABASE_PATH`       | SQLite database file location                       | `./data/habits.db`            |
-| `PORT`                | Backend server port                                 | `3000`                        |
-| `FRONTEND_URL`        | Frontend URL for CORS and redirects                 | `http://localhost:5173`       |
+| Variable              | Description                                         | Example                        | Required |
+|-----------------------|-----------------------------------------------------|--------------------------------|----------|
+| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 Client ID                          | `abc123.apps.googleusercontent.com` | No (if not using Google login) |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret                      | `secret_key_xyz`              | No (if not using Google login) |
+| `GITHUB_CLIENT_ID`    | GitHub OAuth App Client ID                          | `abc123xyz`                   | No (if not using GitHub login) |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth App Client Secret                      | `secret_key_xyz`              | No (if not using GitHub login) |
+| `SESSION_SECRET`      | Secret for session encryption (**32+ chars**)       | see below                     | **Yes** — boots hard fail otherwise |
+| `DATABASE_PATH`       | SQLite database file location                       | `./data/habits.db`            | No (defaults to `./data/habits.db`) |
+| `PORT`                | Backend server port                                 | `3000`                        | No (defaults to `3000`) |
+| `FRONTEND_URL`        | Frontend URL for redirects after OAuth              | `http://localhost:5173`       | No (defaults to `http://localhost:5173`) |
+| `BACKEND_URL`         | Backend URL for building OAuth redirect URIs        | `http://localhost:3000`       | No (defaults to `http://localhost:3000`) |
+| `NODE_ENV`            | Node environment                                    | `development` or `production` | No (defaults to `development`) |
+
+**Important notes:**
+- **`SESSION_SECRET` is REQUIRED** and must be at least 32 characters. The app will refuse to boot without it — no fallback constant is used, even in development. This prevents accidental session-secret exposure.
+- OAuth redirect URIs are built from `BACKEND_URL`, never hardcoded in route code — this allows the same code to work in Docker/production.
+- All three OAuth providers (Google, GitHub, Demo Login) are always available; Demo Login is disabled in production (returns 404).
 
 ### Generate SESSION_SECRET
 
@@ -235,7 +242,8 @@ Copy the output to `SESSION_SECRET` in your `.env` file.
 3. Navigate to **APIs & Services** → **Credentials**
 4. Click **Create Credentials** → **OAuth 2.0 Client ID**
 5. Choose **Web application**
-6. Add **Authorized redirect URI**: `http://localhost:3000/api/auth/google/callback`
+6. Add **Authorized redirect URI**: `${BACKEND_URL}/api/auth/google/callback`
+   - For local dev: `http://localhost:3000/api/auth/google/callback`
 7. Copy **Client ID** and **Client Secret** to your `.env` file
 
 ### GitHub OAuth Setup
@@ -244,15 +252,18 @@ Copy the output to `SESSION_SECRET` in your `.env` file.
 2. Click **OAuth Apps** → **New OAuth App**
 3. Fill in the form:
    - **Application name**: Habit Tracker
-   - **Homepage URL**: `http://localhost:5173`
-   - **Authorization callback URL**: `http://localhost:3000/api/auth/github/callback`
+   - **Homepage URL**: `${FRONTEND_URL}` (for local dev: `http://localhost:5173`)
+   - **Authorization callback URL**: `${BACKEND_URL}/api/auth/github/callback`
+     - For local dev: `http://localhost:3000/api/auth/github/callback`
 4. Copy **Client ID** and **Client Secret** to your `.env` file
+
+**Note:** These URIs are built dynamically from `BACKEND_URL` and `FRONTEND_URL` at runtime — register the callback URLs in OAuth apps using the values you set in `.env`, and they will work in both local dev and production.
 
 ---
 
-## 🗄️ Database Schema
+## 🧪 Running Tests
 
-Run all 49 automated tests:
+Run all automated backend tests:
 
 ```bash
 cd backend
@@ -260,14 +271,14 @@ npm test
 ```
 
 **Test Coverage:**
-- **T1**: SSO login (Google/GitHub, session creation)
-- **T2**: Create and retrieve habits (CRUD operations)
-- **T3**: Duplicate check-in prevention (409 status)
-- **T4**: Future-date and status validation (422 errors)
-- **T5**: User ownership enforcement (403 on unauthorized access)
-- **T6–T8**: Milestone notifications (3, 7, 30-day streaks)
-- **T9**: Milestone de-duplication after reconnect
-- **Streaks**: Current, best, and total check-in calculations
+- **T1**: SSO authentication (demo login, session creation, `/auth/me`)
+- **T2**: Habit CRUD operations and streak calculations
+- **T3**: Check-in duplicate prevention (409 Conflict)
+- **T4**: Check-in validation (future dates, paused habits, status enforcement)
+- **T5**: User ownership and authorization (404 vs 403 semantics)
+- **T6–T9**: WebSocket milestone engine (real `ws` client, subscription, ack protocol, de-duplication)
+- **Rate limiting**: 300 req/15s per IP on all routes
+- **Input validation**: Name length (1–100), description (max 500), date format
 
 ### Type Checking
 
@@ -297,19 +308,26 @@ habit-tracker/
 ├── backend/
 │   ├── src/
 │   │   ├── db/
-│   │   │   ├── schema.ts        # Drizzle ORM table definitions
-│   │   │   ├── migrate.ts       # Database migrations
-│   │   │   └── seed.ts          # Sample data seeding
+│   │   │   ├── schema.ts        # Drizzle ORM table definitions (source of truth)
+│   │   │   ├── migrate.ts       # Generated migrations and application
+│   │   │   ├── seed.ts          # Sample data seeding
+│   │   │   └── index.ts         # Database initialization
 │   │   ├── routes/
-│   │   │   ├── auth.ts          # Authentication routes (Google, GitHub, logout, /me)
-│   │   │   ├── habits.ts        # Habit CRUD operations
-│   │   │   └── checkins.ts      # Check-in routes
+│   │   │   ├── auth.ts          # Auth routes (OAuth, demo-login, logout, /me)
+│   │   │   ├── habits.ts        # Habit CRUD + filtering + streak enrichment
+│   │   │   └── checkins.ts      # Check-in CRUD with validation
+│   │   ├── auth/
+│   │   │   └── oauth.ts         # Hand-rolled OAuth2 (Google + GitHub)
 │   │   ├── ws/
-│   │   │   └── handler.ts       # WebSocket handler + milestone engine
+│   │   │   └── handler.ts       # WebSocket + milestone engine (subscribe/ack protocol)
 │   │   ├── utils/
-│   │   │   └── streaks.ts       # Pure streak calculation function
+│   │   │   ├── streaks.ts       # Pure streak calculation (current, best, total)
+│   │   │   └── date.ts          # Shared "today" UTC helper
 │   │   ├── middleware/
-│   │   │   └── requireAuth.ts   # Session authentication guard
+│   │   │   ├── requireAuth.ts   # Session authentication guard
+│   │   │   └── rateLimit.ts     # Global rate limiting (300 req/15s per IP)
+│   │   ├── session/
+│   │   │   └── sqliteStore.ts   # SQLite-backed session store
 │   │   └── app.ts               # Fastify app setup + plugin registration
 │   ├── tests/
 │   │   ├── auth.test.ts         # T1: SSO login tests
@@ -322,20 +340,28 @@ habit-tracker/
 └── frontend/
     ├── src/
     │   ├── components/
-    │   │   ├── HabitCard.tsx      # Habit card with streak display
-    │   │   ├── HabitModal.tsx     # Create/edit habit modal
-    │   │   ├── NotificationPanel.tsx  # Real-time milestone notifications
-    │   │   └── Calendar.tsx       # Monthly calendar view
+    │   │   ├── HabitCard.tsx      # Habit card with streak display + check-in toggle
+    │   │   ├── HabitModal.tsx     # Create/edit habit modal with status transitions
+    │   │   ├── NotificationPanel.tsx  # Toast stack for milestone notifications
+    │   │   ├── Calendar.tsx       # Monthly calendar grid with check-in highlights
+    │   │   └── LoadingSkeleton.tsx # Loading skeleton for habit list
     │   ├── pages/
-    │   │   ├── LoginPage.tsx      # OAuth login page
-    │   │   ├── DashboardPage.tsx  # Habit list + search/filter
-    │   │   └── HabitDetailPage.tsx # Single habit detail + calendar
+    │   │   ├── LoginPage.tsx      # OAuth login (Google, GitHub, Demo)
+    │   │   ├── DashboardPage.tsx  # Habit list with search/filter/completed-today toggle
+    │   │   └── HabitDetailPage.tsx # Single habit stats + calendar + edit/back actions
     │   ├── hooks/
-    │   │   ├── useHabits.ts       # Habit data fetching with TanStack Query
-    │   │   ├── useCheckin.ts      # Check-in mutations
-    │   │   └── useWebSocket.ts    # WebSocket connection + milestone listener
-    │   ├── main.tsx               # React app entry point
+    │   │   ├── useHabits.ts       # TanStack Query for habit list + filtering
+    │   │   ├── useCheckin.ts      # Create/delete check-in mutations
+    │   │   └── useWebSocket.ts    # WebSocket connection + milestone subscription
+    │   ├── context/
+    │   │   └── WebSocketContext.tsx # Global milestone notifications context
+    │   ├── lib/
+    │   │   ├── api.ts             # Single relative-path HTTP client
+    │   │   └── queryClient.ts     # TanStack Query configuration
+    │   ├── types.ts               # Shared TypeScript types (User, Habit, Checkin, WS messages)
+    │   ├── main.tsx               # React app entry + router
     │   └── index.css              # Tailwind CSS imports
+    ├── tailwind.config.ts         # Tailwind configuration
     └── package.json
 ```
 
@@ -345,12 +371,13 @@ All API routes are prefixed with `/api`. Authentication required except for `/ap
 
 ### Authentication Routes
 
+- `POST /api/auth/demo-login` — Find-or-create demo user (dev/testing only; returns 404 in production)
 - `GET /api/auth/google` — Redirect to Google OAuth consent
-- `GET /api/auth/google/callback` — OAuth callback (auto-create user)
+- `GET /api/auth/google/callback` — OAuth callback (auto-create user if first sign-in)
 - `GET /api/auth/github` — Redirect to GitHub OAuth consent
-- `GET /api/auth/github/callback` — OAuth callback (auto-create user)
-- `POST /api/auth/logout` — Destroy session
-- `GET /api/auth/me` — Get current user profile
+- `GET /api/auth/github/callback` — OAuth callback (auto-create user if first sign-in)
+- `POST /api/auth/logout` — Destroy session (await before clearing client cache)
+- `GET /api/auth/me` — Get current user profile or 401 if not authenticated
 
 ### Habits Routes
 
@@ -362,9 +389,10 @@ All API routes are prefixed with `/api`. Authentication required except for `/ap
 
 ### Check-in Routes
 
-- `GET /api/habits/:id/checkins?month=YYYY-MM` — List check-ins for month
-- `POST /api/habits/:id/checkins` — Create check-in for date
-- `DELETE /api/habits/:id/checkins/:date` — Delete check-in (must be today)
+- `GET /api/habits/:id/checkins?month=YYYY-MM` — List check-ins for month, sorted ascending
+- `POST /api/habits/:id/checkins` — Create check-in for date (`{ date: "YYYY-MM-DD" }`)
+  - Validation: date format → ownership (404) → active status (422) → not future (422) → no duplicate (409)
+- `DELETE /api/habits/:id/checkins/:date` — Delete check-in (date must equal today UTC, 422 otherwise)
 
 ### WebSocket
 
@@ -413,12 +441,12 @@ All IDs are UUIDs. Timestamps are Unix timestamps.
 ### `users`
 ```sql
 id TEXT PRIMARY KEY
-provider TEXT NOT NULL             -- 'google' | 'github'
+provider TEXT NOT NULL             -- 'google' | 'github' | 'demo'
 provider_user_id TEXT NOT NULL
-email TEXT
+email TEXT                         -- nullable
 display_name TEXT NOT NULL
-avatar_url TEXT
-created_at INTEGER NOT NULL
+avatar_url TEXT                    -- nullable
+created_at INTEGER NOT NULL        -- Unix timestamp (seconds)
 UNIQUE(provider, provider_user_id)
 ```
 
@@ -456,18 +484,23 @@ UNIQUE(habit_id, milestone_days)
 
 ---
 
-## 🧪 Running Tests
+## 🔒 Security & Authorization
 
-- [x] Multi-user SSO (Google, GitHub)
-- [x] Create, edit, pause, archive habits
-- [x] Daily check-ins with status enforcement
-- [x] Streak tracking (current, best, total check-ins)
-- [x] Real-time milestone notifications (3, 7, 30 days via WebSocket)
-- [x] Search and filter habits by name and status
-- [x] Responsive mobile-friendly design
-- [x] Automated test suite (9 test scenarios + cascade deletion tests)
-- [x] Type-safe TypeScript throughout
-- [x] Authorization: user ownership enforced on all resources
+All API routes (except `/api/auth/*`) require an authenticated session. User ownership is enforced with semantic HTTP responses:
+
+- **404 Not Found**: Resource does not exist
+- **403 Forbidden**: Resource exists but belongs to another user
+
+This two-tier approach prevents information leakage and provides clear error semantics.
+
+### Rate Limiting
+- **Global sliding window**: 300 requests per 15 seconds per IP
+- Applied to all routes before session deserialization
+- Uses IP from `request.ip` (with `trustProxy: 1`)
+
+### WebSocket Security
+- Authentication enforced at upgrade via `preValidation` hook (before handshake completes)
+- `ack` handler verifies habit ownership before persisting milestone acknowledgments
 
 > **⚠️ Important:** Deleting a habit permanently removes it and ALL its check-in history. To preserve history, use **Archive** instead. See [Habit Deletion & Check-in History](#habit-deletion--check-in-history) for details.
 
@@ -617,14 +650,14 @@ This approach was deliberately chosen for:
 ```bash
 cd backend
 
-# Run migrations to create schema
+# Generate + apply migrations from schema.ts
 npm run db:migrate
 
-# Seed sample data (1 user, 3 habits, check-ins)
+# Seed sample data (1 user, 3 habits with check-ins)
 npm run db:seed
 
-# Reset and rebuild database
-npm run db:reset
+# Reset database (delete and recreate)
+rm -rf data/habits.db && npm run db:migrate && npm run db:seed
 ```
 
 ### Type Checking
@@ -639,50 +672,55 @@ cd frontend && npm run typecheck
 npm run typecheck
 ```
 
-### Debug Logging
-```bash
-# Backend with debug logs
-DEBUG=habit-tracker:* npm run dev -w backend
+### Checking Everything
 
-# Frontend with debug logs
-DEBUG=habit-tracker:* npm run dev -w frontend
+```bash
+# Run all backend tests
+npm test
+
+# Type-check both backend and frontend
+npm run typecheck
+
+# Run Playwright e2e tests (requires running app)
+npm run test:ui
 ```
 
-### Reset Everything
-```bash
-# Delete database and sessions
-rm -rf backend/data
+### Reinstall & Reset
 
-# Reinstall dependencies and reseed
-cd backend && npm run db:migrate && npm run db:seed
+```bash
+# Clean install (from root)
+rm -rf node_modules backend/node_modules frontend/node_modules backend/data
+npm install
+npm run db:migrate -w backend
+npm run db:seed -w backend
+
+# Then start dev servers
+npm run dev
 ```
 
 ---
 
-## 📖 Documentation
+## 📖 Full Documentation
 
 ### Getting Started
-- **[README.md](./README.md)** — Quick start, API overview, and business rules (you are here)
-- **[CLAUDE.md](./CLAUDE.md)** — Full project specification and requirements
-- **[DOCKER.md](./DOCKER.md)** — Complete Docker setup, commands, and troubleshooting
+- **[README.md](./README.md)** — Quick start, API overview, and architecture (you are here)
+- **[CLAUDE.md](./CLAUDE.md)** — Project guide and hard rules (must-read for contributors)
+- **[docs/SPEC.md](./docs/SPEC.md)** — Complete implementation specification (authoritative source)
 
-### Setup & Configuration
+### OAuth & Security
 - **[docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)** — Step-by-step Google and GitHub OAuth setup
-- **[docs/SECURITY.md](./docs/SECURITY.md)** — Security hardening and best practices
-- **[docs/SETUP_CI_CD.md](./docs/SETUP_CI_CD.md)** — Automated Azure deployment via GitHub Actions
-- **[docs/AZURE_SERVICE_PRINCIPAL.md](./docs/AZURE_SERVICE_PRINCIPAL.md)** — Creating the Azure CI/CD identity
-- **[docs/CI_CD_SUMMARY.md](./docs/CI_CD_SUMMARY.md)** — Overview of the CI/CD implementation
+- **[docs/SECURITY.md](./docs/SECURITY.md)** — Security architecture and best practices
+- **[docs/AZURE_OIDC_SETUP.md](./docs/AZURE_OIDC_SETUP.md)** — Azure OIDC federation for CI/CD
 
-### Verification & Testing
-- **[docs/ACCEPTANCE_VERIFIED.md](./docs/ACCEPTANCE_VERIFIED.md)** — Acceptance criteria checklist (14/14 ✅)
-- **[docs/E2E_TESTS.md](./docs/E2E_TESTS.md)** — End-to-end test documentation and results
+### Deployment & CI/CD
+- **[docs/SETUP_CI_CD.md](./docs/SETUP_CI_CD.md)** — Automated Azure deployment via GitHub Actions (~5 min setup)
+- **[docs/CI_CD_SUMMARY.md](./docs/CI_CD_SUMMARY.md)** — CI/CD implementation overview
+- **[DOCKER.md](./DOCKER.md)** — Docker Compose setup, commands, and troubleshooting
 
-### Learning & Future Development
-- **[docs/lessons-learned.md](./docs/lessons-learned.md)** — 17 key insights from building the MVP
-- **[docs/recommendations.md](./docs/recommendations.md)** — Actionable guidance for next projects and features
-
-### API Reference
+### API & Architecture
 - **[API Overview](#api-overview)** — REST API endpoint reference (in this README)
+- **[Database Schema](#database-schema)** — Four-table schema with CASCADE semantics (in this README)
+- **[Streak Calculation & Timezone](#streak-calculation--timezone-handling)** — UTC "today" rules and examples (in this README)
 
 ---
 
@@ -703,11 +741,11 @@ If you encounter bugs or have feature requests:
 3. Make changes and test locally
 4. Submit a pull request
 
-### Code Style
-- TypeScript with strict mode enabled
-- ESLint configuration in workspace
-- Consistent formatting via Prettier (if configured)
-- Test coverage: new features should include tests
+### Code Style & Testing
+- **TypeScript strict mode** — enforced via `npm run typecheck`
+- **No external linters/formatters** — code clarity is the responsibility of authors and reviewers
+- **Test coverage** — new backend features should include tests (see `backend/tests/`)
+- **Follows CLAUDE.md hard rules** — treat as review blockers; see [Hard rules](./CLAUDE.md#hard-rules-real-bugs-in-prior-implementations--treat-as-review-blockers)
 
 ---
 
@@ -717,12 +755,13 @@ MIT
 
 ---
 
-## 🔗 Links
+## 🔗 Quick Links
 
 | Resource | Link |
 |----------|------|
-| GitHub Issues | [Report bugs or request features](../../issues) |
-| Docker Documentation | [DOCKER.md](./DOCKER.md) |
-| Project Spec | [CLAUDE.md](./CLAUDE.md) |
-| Tech Stack | [See above](#-tech-stack)
+| **Full Specification** | [docs/SPEC.md](./docs/SPEC.md) |
+| **Project Guide** | [CLAUDE.md](./CLAUDE.md) |
+| **Tech Stack** | [See above](#-tech-stack) |
+| **Docker** | [DOCKER.md](./DOCKER.md) |
+| **Report Issues** | [GitHub Issues](../../issues) |
 
