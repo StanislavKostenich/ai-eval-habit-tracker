@@ -196,6 +196,7 @@ if az containerapp show \
     --name "$BACKEND_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --image "$BACKEND_IMAGE" \
+    --min-replicas 1 \
     --set-env-vars \
       NODE_ENV=production \
       PORT=3000 \
@@ -215,6 +216,7 @@ else
     --environment "$ENVIRONMENT_NAME" \
     --image "$BACKEND_IMAGE" \
     --target-port 3000 \
+    --min-replicas 1 \
     --ingress internal \
     --registry-server "$AZURE_REGISTRY_LOGIN_SERVER" \
     --env-vars \
@@ -231,45 +233,28 @@ else
   echo "    Backend app created."
 fi
 
-# --- 6b. Ensure the backend container exposes port 3000 --------------------
-# `az containerapp create --target-port 3000` sets the container's target port
-# but does NOT add a `ports` entry, so `exposedPort` stays 0 and the internal
-# ingress FQDN forwards nothing. The frontend nginx proxies to this FQDN, so
-# without this patch every /api and /ws request gets a 404/502.
+# --- 6b. Keep one backend replica warm (minReplicas=1) ---------------------
+# The backend runs on the ACA **Consumption** workload profile, which autoscales
+# to ZERO when idle (minReplicas defaults to 0). The next request after idle
+# then triggers a cold start (image pull + Node boot + SQLite open) that can
+# exceed the ingress gateway timeout, so the client gets a **504 Gateway
+# Timeout** on the first hit — intermittent 504s on /api/* after quiet periods.
 #
-# We dump the current spec, inject the ports array, and apply it via --yaml.
-# This is idempotent: re-apply on every deploy (update path included).
+# `minReplicas: 1` keeps one replica resident so there is no cold start. This
+# is the real fix for the 504s; it is NOT a port-exposure issue (the valid
+# routing field `ingress.targetPort` is set by --target-port 3000 above, and the
+# ContainerAppContainer schema has no `ports` field — the API rejects it).
+#
+# Idempotent: re-applied on every deploy (update path included).
 
 echo ""
-echo "==> Ensuring backend container exposes port 3000 on internal ingress"
-BACKEND_SPEC_FILE="$(mktemp)"
-BACKEND_SPEC_PATCHED_FILE="$(mktemp)"
-trap 'rm -f "$BACKEND_SPEC_FILE" "$BACKEND_SPEC_PATCHED_FILE"' RETURN
-
-az containerapp show \
-  --name "$BACKEND_APP_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --output json > "$BACKEND_SPEC_FILE"
-
-python3 -c "
-import json
-with open('$BACKEND_SPEC_FILE') as f:
-    app = json.load(f)
-container = app['properties']['template']['containers'][0]
-ports = container.get('ports') or []
-if not any(p.get('port') == 3000 for p in ports):
-    ports.append({'protocol': 'HTTP', 'port': 3000})
-    container['ports'] = ports
-with open('$BACKEND_SPEC_PATCHED_FILE', 'w') as f:
-    json.dump(app, f)
-"
-
+echo "==> Keeping one backend replica warm (min-replicas 1)"
 az containerapp update \
   --name "$BACKEND_APP_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --yaml "$BACKEND_SPEC_PATCHED_FILE" \
+  --min-replicas 1 \
   --output none
-echo "    Backend port 3000 exposed."
+echo "    Backend min-replicas set to 1 (no cold-start 504s)."
 
 # --- 7. Retrieve the backend's internal FQDN ------------------------------
 
