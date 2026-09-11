@@ -27,7 +27,7 @@ WORKDIR /repo
 # Root manifest + workspace manifests + the single lockfile. (The .dockerignore
 # at the repo root keeps node_modules and env files out of the context; a
 # per-workspace .dockerignore does NOT apply when the context is the root.)
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json tsconfig.base.json ./
 COPY backend/package.json backend/
 COPY frontend/package.json frontend/
 
