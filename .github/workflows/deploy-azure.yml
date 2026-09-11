@@ -87,10 +87,10 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           # GitHub forbids Actions secrets named GITHUB_*, so the GitHub OAuth
-          # app credentials are stored under GITHUB_OAUTH_* secret names. They
+          # app credentials are stored under GH_OAUTH_* secret names. They
           # are mapped here to the app's own GITHUB_CLIENT_ID/SECRET env vars.
-          GITHUB_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
-          GITHUB_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
           SESSION_SECRET: ${{ steps.secrets.outputs.session_secret }}
         run: |
           bash scripts/deploy-ci.sh
