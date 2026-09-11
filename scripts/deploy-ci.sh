@@ -242,28 +242,32 @@ fi
 
 echo ""
 echo "==> Ensuring backend container exposes port 3000 on internal ingress"
-BACKEND_SPEC=$(az containerapp show \
+BACKEND_SPEC_FILE="$(mktemp)"
+BACKEND_SPEC_PATCHED_FILE="$(mktemp)"
+trap 'rm -f "$BACKEND_SPEC_FILE" "$BACKEND_SPEC_PATCHED_FILE"' RETURN
+
+az containerapp show \
   --name "$BACKEND_APP_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --output json)
+  --output json > "$BACKEND_SPEC_FILE"
 
-BACKEND_SPEC_PATCHED=$(echo "$BACKEND_SPEC" | python3 -c "
-import sys, json
-app = json.load(sys.stdin)
+python3 -c "
+import json
+with open('$BACKEND_SPEC_FILE') as f:
+    app = json.load(f)
 container = app['properties']['template']['containers'][0]
 ports = container.get('ports') or []
 if not any(p.get('port') == 3000 for p in ports):
     ports.append({'protocol': 'HTTP', 'port': 3000})
     container['ports'] = ports
-    json.dump(app, sys.stdout)
-else:
-    json.dump(app, sys.stdout)
-")
+with open('$BACKEND_SPEC_PATCHED_FILE', 'w') as f:
+    json.dump(app, f)
+"
 
-echo "$BACKEND_SPEC_PATCHED" | az containerapp update \
+az containerapp update \
   --name "$BACKEND_APP_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --yaml - \
+  --yaml "$BACKEND_SPEC_PATCHED_FILE" \
   --output none
 echo "    Backend port 3000 exposed."
 
