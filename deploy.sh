@@ -210,8 +210,15 @@ else
         --resource-group "$RESOURCE_GROUP" \
         --name "$REGISTRY_NAME" \
         --sku Basic \
+        --admin-enabled true \
         --output none
     print_success "ACR created"
+fi
+
+# Ensure admin credentials are enabled (required for az acr build to push).
+# If the ACR was created before --admin-enabled was added, enable it now.
+if ! az acr update --resource-group "$RESOURCE_GROUP" --name "$REGISTRY_NAME" --admin-enabled true --output none 2>/dev/null; then
+    print_warning "Could not enable ACR admin credentials (may already be enabled)."
 fi
 
 # Step 3: Build and push images
@@ -221,6 +228,7 @@ print_header "Step 3: Building and pushing images to ACR"
 echo "Building backend image..."
 az acr build \
     --registry "$REGISTRY_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
     --image habit-tracker-backend:latest \
     --file backend/Dockerfile \
     "$SCRIPT_DIR" \
@@ -231,6 +239,7 @@ print_success "Backend image pushed"
 echo "Building frontend image (v1)..."
 az acr build \
     --registry "$REGISTRY_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
     --image habit-tracker-frontend:latest \
     --file frontend/Dockerfile \
     "$SCRIPT_DIR" \
@@ -338,6 +347,7 @@ print_header "Step 8: Rebuilding frontend image with updated nginx.conf"
 echo "Building frontend image (v2 with correct backend proxy)..."
 az acr build \
     --registry "$REGISTRY_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
     --image habit-tracker-frontend:latest \
     --file frontend/Dockerfile \
     "$SCRIPT_DIR" \

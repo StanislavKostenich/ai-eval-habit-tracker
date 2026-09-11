@@ -91,11 +91,12 @@ COPY backend/package.json backend/
 RUN printf '{"name":"habit-tracker","private":true,"workspaces":["backend"]}\n' > package.json \
     && npm install --omit=dev
 
-# Compiled application (ESM) and the drizzle migrations, taken from the
-# builder. `drizzle/` is a sibling of `dist/` under the workdir, exactly where
+# Compiled application (ESM) from the builder, and the drizzle migrations
+# copied directly from the build context (they're static SQL, no build needed).
+# `drizzle/` sits as a sibling of `dist/` under the workdir, exactly where
 # `dist/db/migrate.js` expects it (`import.meta.url` + ../../drizzle).
 COPY --from=builder /repo/backend/dist ./dist
-COPY --from=builder /repo/backend/drizzle ./drizzle
+COPY backend/drizzle ./drizzle
 
 # The SQLite data directory (DATABASE_PATH=/data/habits.db) is a named volume
 # in docker-compose. Create it and hand it to the non-root user so the app can
