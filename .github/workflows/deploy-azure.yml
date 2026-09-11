@@ -4,19 +4,17 @@ name: Deploy to Azure Container Apps
 #   - Every push to main
 #   - Manual "Run workflow" from the Actions tab
 #
-# AUTH (OIDC federation — no service principal secrets, no manual token
-# refresh):
-#   A federated identity credential is registered in your Entra ID tenant for
-#   this GitHub repository. Each workflow run, GitHub mints a short-lived
-#   OIDC token (github.token) which `az login --identity --federated`
-#   exchanges for an Azure access token. No secrets needed, no expiry dance.
+# AUTH (Service Principal):
+#   GitHub secrets store the Azure service principal credentials used to
+#   authenticate and deploy. The service principal was created with:
+#     az ad sp create-for-rbac --name github-actions-habit-tracker --role Contributor
 #
-#   One-time setup (see docs/AZURE_OIDC_SETUP.md):
-#     1. Create an Entra ID app registration + a federated identity
-#        credential for this repo (subject: repo:ai-eval-habit-tracker:main).
-#     2. Assign the app's service principal the Contributor role on the
-#        target subscription.
-#     3. Store the app's client ID as the AZURE_CLIENT_ID secret.
+#   One-time setup (see docs/AZURE_SERVICE_PRINCIPAL.md):
+#     1. Create the service principal using the command above.
+#     2. Copy clientId → AZURE_CLIENT_ID secret
+#     3. Copy clientSecret → AZURE_CLIENT_SECRET secret
+#     4. Copy tenantId → AZURE_TENANT_ID secret
+#     5. Copy subscriptionId → AZURE_SUBSCRIPTION_ID secret
 
 on:
   push:
@@ -31,7 +29,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: deploy-azure-${{ github.ref }}
@@ -67,12 +64,20 @@ jobs:
             az version
           fi
 
-      - name: Authenticate to Azure (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: 1a54e107-6999-4f70-acdb-194c649c72f2
-          subscription-id: c3c7cf3e-d1a9-4653-b9a9-a43188215731
+      - name: Authenticate to Azure (via az CLI)
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          az login --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID" \
+            --output none
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          echo "✓ Authenticated to Azure"
 
       - name: Deploy to Azure Container Apps
         env:
