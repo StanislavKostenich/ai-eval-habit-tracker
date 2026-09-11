@@ -50,10 +50,10 @@ jobs:
           SESSION_SECRET="${PROVIDED:-$(openssl rand -hex 32)}"
           echo "session_secret=$SESSION_SECRET" >> "$GITHUB_OUTPUT"
 
-      - name: Install Azure CLI
-        run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | bash
-          az version
+      - name: Set up Azure CLI
+        uses: azure/setup-azcli@v1
+        with:
+          version: latest
 
       - name: Validate Azure token
         env:
