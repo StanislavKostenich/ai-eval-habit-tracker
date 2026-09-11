@@ -23,10 +23,18 @@ set -euo pipefail
 #   6. No local Docker dependency — all image builds go through `az acr build`
 #      (Azure's managed build service), so no local Docker daemon is needed.
 #
+# AUTH (device-code flow — no service principal):
+#   This script does NOT authenticate on its own. It expects to already be
+#   authenticated via the AZURE_AUTH environment variable, which carries a
+#   JSON array of accounts containing a ~60-minute personal access token.
+#   That token is produced by `bash scripts/refresh-azure-token.sh` (an
+#   interactive `az login --use-device-code` flow you complete in a browser),
+#   which also stores the raw token as the AZURE_ACCESS_TOKEN GitHub secret.
+#   The GitHub Actions workflow passes AZURE_ACCESS_TOKEN to this script as an
+#   env var; this script then builds AZURE_AUTH from it (step 2 below).
+#
 # Required environment variables (all must be non-empty):
-#   AZURE_CLIENT_ID              Service principal client (app) ID
-#   AZURE_CLIENT_SECRET          Service principal client secret
-#   AZURE_TENANT_ID              Azure AD tenant ID
+#   AZURE_ACCESS_TOKEN           The raw Bearer token (used to build AZURE_AUTH)
 #   AZURE_SUBSCRIPTION_ID        Azure subscription ID
 #   AZURE_RESOURCE_GROUP         Target resource group (created if missing)
 #   AZURE_LOCATION               Azure region (e.g. eastus)
@@ -44,9 +52,7 @@ set -euo pipefail
 # --- 0. Validate required environment variables ---------------------------
 
 REQUIRED_VARS=(
-  AZURE_CLIENT_ID
-  AZURE_CLIENT_SECRET
-  AZURE_TENANT_ID
+  AZURE_ACCESS_TOKEN
   AZURE_SUBSCRIPTION_ID
   AZURE_RESOURCE_GROUP
   AZURE_LOCATION
@@ -104,19 +110,47 @@ echo "    Frontend App:       $FRONTEND_APP_NAME"
 echo "    Environment:        $ENVIRONMENT_NAME"
 echo "    Repo Root:          $SCRIPT_DIR"
 
-# --- 2. Authenticate to Azure with the service principal ------------------
+# --- 2. Authenticate to Azure via the pre-captured access token -----------
+# We do NOT call `az login` here. Instead we export AZURE_AUTH, which makes the
+# Azure CLI use the provided token for every command (including az acr build).
+# The token was captured locally via `az login --use-device-code` and pushed to
+# the AZURE_ACCESS_TOKEN GitHub secret by scripts/refresh-azure-token.sh.
+#
+# AZURE_AUTH must be a JSON array of account objects. The minimum shape the
+# CLI needs is: { "clientId": "...", "tenantId": "...", "environmentName":
+# "AzureCloud", "id": "...", "user": { "name": "...", "type": "user" },
+# "accessToken": "<token>", "isActive": true }.
+#
+# We build it from AZURE_ACCESS_TOKEN. We do not know the user's UPN or
+# clientId here (they weren't captured), so we use placeholders — the CLI
+# only needs a valid accessToken to authorize API calls; it does not validate
+# the identity fields against the token for resource-manager operations.
 
 echo ""
-echo "==> Authenticating to Azure (service principal)"
-az login --service-principal \
-  --username "$AZURE_CLIENT_ID" \
-  --password "$AZURE_CLIENT_SECRET" \
-  --tenant "$AZURE_TENANT_ID" \
-  --output none
-echo "    Logged in."
+echo "==> Authenticating to Azure (pre-captured access token)"
 
-az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-echo "    Subscription set: $AZURE_SUBSCRIPTION_ID"
+# Sanitize the token for safe JSON embedding (it's a plain base64url JWT, so
+# no escaping needed, but guard against stray backslashes/quotes defensively).
+TOKEN_ESCAPED=${AZURE_ACCESS_TOKEN//\\/\\\\}
+TOKEN_ESCAPED=${TOKEN_ESCAPED//\"/\\\"}
+
+AZURE_AUTH='[
+  {
+    "clientId": "a0000000-0000-0000-0000-000000000000",
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "environmentName": "AzureCloud",
+    "id": "a0000000-0000-0000-0000-000000000000",
+    "user": { "name": "ci-user@placeholder", "type": "user" },
+    "isDefault": true,
+    "isHome": true,
+    "accessToken": "'"$TOKEN_ESCAPED"'",
+    "isActive": true
+  }
+]'
+export AZURE_AUTH
+
+echo "    AZURE_AUTH set from AZURE_ACCESS_TOKEN (${#AZURE_ACCESS_TOKEN} chars)."
+echo "    All az commands will use this token."
 
 # --- 3. Ensure the resource group exists ----------------------------------
 

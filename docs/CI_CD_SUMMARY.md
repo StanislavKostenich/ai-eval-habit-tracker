@@ -7,9 +7,10 @@ This project now deploys to Azure Container Apps automatically via GitHub Action
 | File | Purpose |
 |---|---|
 | `.github/workflows/deploy-azure.yml` | GitHub Actions workflow. Triggers on `push: branches: [main]` and `workflow_dispatch`. Resolves `SESSION_SECRET`, installs the Azure CLI, runs `scripts/deploy-ci.sh`, then re-fetches and prints the deployed frontend URL. |
-| `scripts/deploy-ci.sh` | Non-interactive deploy script. All inputs via env vars, `set -euo pipefail`, no prompts, no color. Idempotent (reuses existing Azure resources). |
-| `docs/AZURE_SERVICE_PRINCIPAL.md` | How to create the Azure service principal GitHub Actions authenticates with, plus troubleshooting and secret-rotation. |
-| `docs/SETUP_CI_CD.md` | End-to-end setup: clone → service principal → register secrets/variables → first deploy → OAuth redirect URIs → test → troubleshooting. |
+| `scripts/deploy-ci.sh` | Non-interactive deploy script. All inputs via env vars, `set -euo pipefail`, no prompts, no color. Idempotent (reuses existing Azure resources). Authenticates via the pre-captured `AZURE_ACCESS_TOKEN` (device-code flow). |
+| `scripts/refresh-azure-token.sh` | Local helper: runs `az login --use-device-code` (interactive browser flow), captures the ~60-min access token, and pushes it to the `AZURE_ACCESS_TOKEN` GitHub secret. Run before each deploy. |
+| `docs/AZURE_SERVICE_PRINCIPAL.md` | How to create a service principal — the durable "Option A" alternative to the device-code demo flow (requires an admin). |
+| `docs/SETUP_CI_CD.md` | End-to-end setup: clone → refresh token → register secrets/variables → first deploy → OAuth redirect URIs → test → troubleshooting. |
 
 ## Modified files
 
@@ -30,8 +31,8 @@ push to main  (or manual "Run workflow")
         |-- install Azure CLI
         |-- run scripts/deploy-ci.sh   (with secrets + vars as env)
         |        |
-        |        |-- validate 11 required env vars
-        |        |-- az login (service principal)
+        |        |-- validate 10 required env vars
+        |        |-- export AZURE_AUTH (from AZURE_ACCESS_TOKEN; device-code)
         |        |-- ensure resource group
         |        |-- ensure ACR (Basic, admin-enabled)
         |        |-- az acr build  backend  (context = repo root)
@@ -51,17 +52,20 @@ push to main  (or manual "Run workflow")
   https://<frontend-FQDN>   (live)
 ```
 
-## Secrets required (9, in GitHub repo settings)
+## Secrets required (6, in GitHub repo settings)
 
-- `AZURE_CLIENT_ID`
-- `AZURE_CLIENT_SECRET`
-- `AZURE_TENANT_ID`
-- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_ACCESS_TOKEN` (a fresh ~60-min token, refreshed via `scripts/refresh-azure-token.sh` before each deploy — device-code flow, no service principal)
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `SESSION_SECRET` (optional — auto-generated if absent, but set it to keep sessions stable across deploys)
+
+> `AZURE_SUBSCRIPTION_ID` and `AZURE_TENANT_ID` are hardcoded in the workflow and in `refresh-azure-token.sh` (non-sensitive identifiers, not secrets).
+
+## Auth model
+
+The default auth is the **device-code flow** (no service principal). You refresh a personal access token locally before each deploy; it expires in ~60 minutes. For a durable, no-refresh setup, switch to a **service principal** (Option A, requires an admin) — see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
 
 ## Variables required (3, in GitHub repo settings)
 

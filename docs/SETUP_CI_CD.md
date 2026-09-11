@@ -4,17 +4,20 @@ This guide takes you from a fresh clone to a live habit-tracker deployment on Az
 
 ## What you'll set up
 
-1. An **Azure service principal** (a CI-only identity) — see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
-2. **Nine repository secrets** in GitHub (Azure + OAuth credentials).
+1. **Azure credentials via device-code login** — no service principal needed. You refresh a ~60-minute access token locally before each deploy.
+2. **Six repository secrets** in GitHub (Azure token + OAuth credentials + session secret).
 3. **Three repository variables** in GitHub (non-sensitive Azure topology).
 4. A **first deployment** (manual trigger or push to `main`).
 5. **OAuth redirect URIs** registered with Google and GitHub.
 
+> **Auth model (device-code, no service principal):** GitHub Actions authenticates to Azure with a personal access token that you refresh in a browser before each deploy. This is the "demo" fallback for when you can't get an admin to create a service principal. The token expires in ~60 minutes, so you must run `bash scripts/refresh-azure-token.sh` and be present at deploy time. For a durable setup, prefer a service principal (Option A) — see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
+
 ## Prerequisites
 
 - A GitHub account with a repository (this one, or a fork).
-- An Azure subscription with active credits.
-- Azure CLI installed locally (only for creating the service principal — not needed for the deploy itself).
+- An Azure subscription with active credits, and an account that can sign in to it.
+- **Azure CLI installed locally** (`az --version`) — needed to run the device-code login that produces the token.
+- **`gh` CLI authenticated** (`gh auth status`) — needed to push the token to the GitHub secret.
 - Google and GitHub OAuth apps already created (see `README.md` → OAuth Setup for how to create them).
 
 ---
@@ -29,27 +32,33 @@ git remote -v   # verify the origin
 
 (Or download the zip from the GitHub UI and extract it.)
 
-## Step 2 — Create an Azure service principal
+## Step 2 — Refresh your Azure access token (device-code login)
 
-Follow the full walkthrough in [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
+You don't create a service principal. Instead, you produce a short-lived personal access token with the interactive device-code flow:
 
-**Save the four values** from the `--json-auth` output:
-- `clientId`
-- `clientSecret`
-- `subscriptionId`
-- `tenantId`
+```bash
+bash scripts/refresh-azure-token.sh
+```
+
+What happens:
+1. `az login --use-device-code` prints a URL + code. Open the URL in a browser, sign in as your Azure account, and enter the code (you have ~5 minutes).
+2. On success, the script captures the resulting access token (valid ~60 minutes).
+3. It pushes the token to the `AZURE_ACCESS_TOKEN` GitHub repository secret via `gh api`.
+
+> **Do this before every deploy.** The token expires in ~60 minutes. If you push to `main` to trigger a deploy, refresh the token first, then push.
+
+**Prerequisites for this step:** `az` on PATH, `gh` authenticated, and a browser to complete the flow.
 
 ## Step 3 — Register secrets in GitHub
 
 1. GitHub repo → **Settings** → **Secrets and variables** → **Actions**.
-2. **New repository secret** for each of the nine below:
+2. **New repository secret** for each of the six below:
+
+> `AZURE_SUBSCRIPTION_ID` and `AZURE_TENANT_ID` are **not** secrets — they're hardcoded in `.github/workflows/deploy-azure.yml` (they're non-sensitive identifiers). The `refresh-azure-token.sh` script also hardcodes the tenant + subscription IDs.
 
 | Secret name | Value |
 |---|---|
-| `AZURE_CLIENT_ID` | `clientId` from the service principal JSON |
-| `AZURE_CLIENT_SECRET` | `clientSecret` from the service principal JSON |
-| `AZURE_TENANT_ID` | `tenantId` from the service principal JSON |
-| `AZURE_SUBSCRIPTION_ID` | `subscriptionId` from the service principal JSON |
+| `AZURE_ACCESS_TOKEN` | Set automatically by `scripts/refresh-azure-token.sh` (a fresh token before each deploy). |
 | `GOOGLE_CLIENT_ID` | From Google Cloud Console → Credentials |
 | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console → Credentials |
 | `GITHUB_CLIENT_ID` | From GitHub → Settings → Developer settings → OAuth Apps |
@@ -73,32 +82,36 @@ Still in **Secrets and variables** → **Actions**, click **New repository varia
 ## Step 5 — Verify everything is registered
 
 Back in **Settings** → **Secrets and variables** → **Actions**:
-- **Repository secrets**: you should see all **9** secrets listed.
+- **Repository secrets**: you should see all **6** secrets listed (including `AZURE_ACCESS_TOKEN`, which the refresh script populates).
 - **Repository variables**: you should see all **3** variables listed.
 
 If any are missing, add them now.
 
 ## Step 6 — Trigger the first deployment
 
+> **Always refresh the token first.** Run `bash scripts/refresh-azure-token.sh` and complete the browser flow. The deploy then has to happen within ~60 minutes, while the token is still valid.
+
 ### Option A — Manual trigger (recommended for the first run)
 
-1. GitHub repo → **Actions** tab.
-2. Left sidebar → **Deploy to Azure Container Apps**.
-3. Click **Run workflow** (top-right) → select `main` → **Run workflow**.
-4. Optionally enter a `session_secret` (leave blank to auto-generate).
-5. Watch the run live. First deploy takes **~5–10 minutes** (it creates the ACR, the Container Apps Environment, builds two multi-stage images, and provisions two Container Apps).
+1. Run `bash scripts/refresh-azure-token.sh` and complete the browser device-code flow.
+2. GitHub repo → **Actions** tab.
+3. Left sidebar → **Deploy to Azure Container Apps**.
+4. Click **Run workflow** (top-right) → select `main` → **Run workflow**.
+5. Optionally enter a `session_secret` (leave blank to auto-generate).
+6. Watch the run live. First deploy takes **~5–10 minutes** (it creates the ACR, the Container Apps Environment, builds two multi-stage images, and provisions two Container Apps). Start it soon after refreshing so the token doesn't expire mid-run.
 
 ### Option B — Push to `main`
 
 The workflow is also wired to `push: branches: [main]`, so any push to `main` deploys automatically:
 
 ```bash
+bash scripts/refresh-azure-token.sh   # refresh the token first
 git add .
 git commit -m "initial"
-git push origin main
+git push origin main                  # triggers the deploy
 ```
 
-Then watch the **Actions** tab.
+Then watch the **Actions** tab. Push promptly after refreshing so the token is still valid when the run starts.
 
 ## Step 7 — Find your deployment URL
 
@@ -161,13 +174,17 @@ Already on by default: the workflow triggers on `push: branches: [main]`. Any co
 
 ### Workflow fails: "Required variables are not set"
 
-`scripts/deploy-ci.sh` validates all 11 required env vars up front and lists exactly which are missing. Check that the corresponding GitHub secret/variable is:
+`scripts/deploy-ci.sh` validates all 10 required env vars up front and lists exactly which are missing. Check that the corresponding GitHub secret/variable is:
 - Named **exactly** (case-sensitive) as in this guide.
 - Set at the **repository** level (not environment-level, unless your workflow targets that environment).
 
-### Workflow fails: "Insufficient privileges to perform action"
+### Workflow fails: "AZURE_ACCESS_TOKEN expired" or "AuthorizationFailed" / 401
 
-The service principal lacks `Contributor` on the subscription scope. See [AZURE_SERVICE_PRINCIPAL.md → Troubleshooting](./AZURE_SERVICE_PRINCIPAL.md#troubleshooting).
+The access token you pushed has expired (it's valid ~60 minutes). This is the expected failure mode of the device-code demo flow:
+1. Re-run `bash scripts/refresh-azure-token.sh` and complete the browser flow.
+2. Re-run the workflow (Actions → the failed run → **Re-run all jobs**), or push to `main` again.
+
+> For a durable, no-refresh setup, switch to a service principal (Option A): see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
 
 ### Workflow fails: "Failed to retrieve backend FQDN"
 

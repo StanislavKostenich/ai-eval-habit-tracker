@@ -1,15 +1,17 @@
 name: Deploy to Azure Container Apps
 
 # Triggers:
-#   - Every push to main (auto-deploy on commit)
-#   - Manual "Run workflow" from the Actions tab (workflow_dispatch), with an
-#     optional session_secret input. If blank, a random one is generated.
+#   - Every push to main
+#   - Manual "Run workflow" from the Actions tab
 #
-# The deployment itself is performed by scripts/deploy-ci.sh, which is
-# non-interactive and reads every input from environment variables. All Azure
-# credentials and OAuth secrets come from GitHub repository secrets; the
-# non-sensitive resource-group / location / registry values come from
-# repository variables.
+# AUTH (device code, no service principal):
+#   Before each deploy, run locally:  bash scripts/refresh-azure-token.sh
+#   This does `az login --use-device-code` (browser flow), captures the
+#   ~60-minute access token, and stores it as the AZURE_ACCESS_TOKEN
+#   GitHub secret. The workflow reads that secret and uses `az rest`
+#   (which accepts a raw Bearer token) for all Azure API calls.
+#
+#   The token expires in ~60 minutes, so refresh before each deploy.
 
 on:
   push:
@@ -18,17 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       session_secret:
-        description: 'Session secret (optional — a random 64-char value is generated if left blank). Must be at least 32 chars.'
+        description: 'Session secret (optional — random 64-char value if blank). Must be >= 32 chars.'
         required: false
         default: ''
 
 permissions:
   contents: read
 
-# `environment: production` lets you attach branch/required-reviewer
-# protection rules to the "production" environment in repo settings if you
-# want a manual approval gate before each deploy. Without any rules configured,
-# the job runs normally.
 concurrency:
   group: deploy-azure-${{ github.ref }}
   cancel-in-progress: false
@@ -38,7 +36,7 @@ jobs:
     name: Build & deploy to Azure
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
       - name: Checkout code
@@ -49,15 +47,7 @@ jobs:
         env:
           PROVIDED: ${{ github.event.inputs.session_secret }}
         run: |
-          if [[ -n "$PROVIDED" ]]; then
-            # Caller supplied an explicit secret (e.g. to keep it stable
-            # across redeploys so existing sessions don't get invalidated).
-            SESSION_SECRET="$PROVIDED"
-          else
-            SESSION_SECRET="$(openssl rand -hex 32)"
-          fi
-          # Echo as an output so the deploy step can read it without it ever
-          # appearing in the workflow log as a literal secret value.
+          SESSION_SECRET="${PROVIDED:-$(openssl rand -hex 32)}"
           echo "session_secret=$SESSION_SECRET" >> "$GITHUB_OUTPUT"
 
       - name: Install Azure CLI
@@ -65,54 +55,52 @@ jobs:
           curl -sL https://aka.ms/InstallAzureCLIDeb | bash
           az version
 
+      - name: Validate Azure token
+        env:
+          AZURE_ACCESS_TOKEN: ${{ secrets.AZURE_ACCESS_TOKEN }}
+        run: |
+          if [[ -z "$AZURE_ACCESS_TOKEN" ]]; then
+            echo "ERROR: AZURE_ACCESS_TOKEN secret is empty."
+            echo "Run 'bash scripts/refresh-azure-token.sh' locally to generate"
+            echo "a fresh token, then re-run this workflow."
+            exit 1
+          fi
+          echo "Token present (${#AZURE_ACCESS_TOKEN} chars)."
+
       - name: Deploy to Azure Container Apps
         env:
-          # Azure service principal (secrets)
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          # Non-sensitive Azure topology (variables)
+          AZURE_ACCESS_TOKEN: ${{ secrets.AZURE_ACCESS_TOKEN }}
+          AZURE_SUBSCRIPTION_ID: c3c7cf3e-d1a9-4653-b9a9-a43188215731
+          AZURE_TENANT_ID: 1a54e107-6999-4f70-acdb-194c649c72f2
           AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
           AZURE_REGISTRY_LOGIN_SERVER: ${{ vars.AZURE_REGISTRY_LOGIN_SERVER }}
-          # OAuth (secrets)
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GITHUB_CLIENT_ID: ${{ secrets.GITHUB_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.GITHUB_CLIENT_SECRET }}
-          # Session (resolved above)
           SESSION_SECRET: ${{ steps.secrets.outputs.session_secret }}
         run: |
           bash scripts/deploy-ci.sh
-        # Capture the FRONTEND_URL line the script prints, for the summary.
-        id: deploy
-        # (deploy-ci.sh prints FRONTEND_URL=<url> as its last line; we don't
-        # parse it here because the az CLI can re-fetch it in the summary step.)
 
       - name: Fetch deployed frontend URL
         if: success()
         id: url
         env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_ACCESS_TOKEN: ${{ secrets.AZURE_ACCESS_TOKEN }}
+          SUBSCRIPTION_ID: c3c7cf3e-d1a9-4653-b9a9-a43188215731
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | bash
-          az login --service-principal \
-            --username "$AZURE_CLIENT_ID" \
-            --password "$AZURE_CLIENT_SECRET" \
-            --tenant "$AZURE_TENANT_ID" \
-            --output none
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-          FQDN=$(az containerapp show \
-            --name frontend-app \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'properties.configuration.ingress.fqdn' -o tsv)
+          FQDN=$(az rest \
+            --method GET \
+            --url "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/Microsoft.ContainerService/containerApps/frontend-app?api-version=2024-03-01" \
+            --headers "Authorization=Bearer ${AZURE_ACCESS_TOKEN}" \
+            --query 'properties.configuration.ingress.fqdn' -o tsv 2>/dev/null || echo "")
+          if [[ -z "$FQDN" || "$FQDN" == "None" ]]; then
+            echo "WARNING: Could not fetch FQDN via az rest. It may still be provisioning."
+            FQDN=""
+          fi
           echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
-          echo "frontend_url=https://$FQDN" >> "$GITHUB_OUTPUT"
 
       - name: Deployment summary (success)
         if: success()
@@ -120,14 +108,18 @@ jobs:
           {
             echo "## ✅ Deployment Successful"
             echo ""
-            echo "**Frontend URL:** [https://${{ steps.url.outputs.fqdn }}](https://${{ steps.url.outputs.fqdn }})"
+            if [[ -n "${{ steps.url.outputs.fqdn }}" ]]; then
+              echo "**Frontend URL:** [https://${{ steps.url.outputs.fqdn }}](https://${{ steps.url.outputs.fqdn }})"
+            else
+              echo "Frontend is deploying. Check the Azure Portal or re-run the"
+              echo "'Fetch deployed frontend URL' step in a minute."
+            fi
             echo ""
             echo "Resource group: \`${{ vars.AZURE_RESOURCE_GROUP }}\`"
-            echo "Registry: \`${{ vars.AZURE_REGISTRY_LOGIN_SERVER }}\`"
             echo ""
             echo "### Next steps"
-            echo "1. Register the frontend URL as an OAuth redirect URI with Google and GitHub (see \`docs/SETUP_CI_CD.md\`)."
-            echo "2. Open the URL above and test login."
+            echo "1. Register the frontend URL as an OAuth redirect URI (see \`docs/SETUP_CI_CD.md\`)."
+            echo "2. Open the URL and test login."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deployment summary (failure)
@@ -136,10 +128,13 @@ jobs:
           {
             echo "## ❌ Deployment Failed"
             echo ""
-            echo "Check the logs above for the failing step. Common causes:"
-            echo "- Missing or invalid Azure service principal credentials"
-            echo "- Missing GitHub repository secrets or variables (names are case-sensitive)"
-            echo "- SESSION_SECRET shorter than 32 characters"
-            echo "- ACR name not globally unique"
-            echo "- Backend FQDN not yet resolvable (re-run after a couple of minutes)"
+            echo "Most likely cause: **the Azure access token expired** (valid ~60 min)."
+            echo ""
+            echo "Fix: run \`bash scripts/refresh-azure-token.sh\` locally, complete the"
+            echo "browser device-code flow, then re-run this workflow."
+            echo ""
+            echo "Other causes:"
+            echo "- AZURE_ACCESS_TOKEN secret is empty (refresh script wasn't run)"
+            echo "- Missing GitHub secrets or variables"
+            echo "- SESSION_SECRET under 32 chars"
           } >> "$GITHUB_STEP_SUMMARY"
