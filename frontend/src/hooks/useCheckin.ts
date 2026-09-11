@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { getTodayISO } from '../lib/getTodayISO';
+import { habitKeys } from './useHabits';
 
 /** Canonical check-ins query key: `['checkins', habitId, month]`. */
 export const checkinKeys = {
@@ -21,8 +22,10 @@ export function useCheckins(habitId: string, month: string) {
  *
  * `completedToday` decides the direction: true → undo today's check-in
  * (`DELETE` for `getTodayISO()`); false → check in (`POST` for
- * `getTodayISO()`). Both invalidate the habits list so streaks and
- * `completedToday` refresh. Use `isHabitBusy(id)` to show a per-card spinner.
+ * `getTodayISO()`). Both invalidate the habits-list prefix AND the toggled
+ * habit's detail key, so streaks/`completedToday` refresh on the dashboard AND
+ * a check-in/undo made while a detail page is open stays consistent. Use
+ * `isHabitBusy(id)` to show a per-card spinner.
  */
 export function useToggleCheckin() {
   const queryClient = useQueryClient();
@@ -35,8 +38,9 @@ export function useToggleCheckin() {
         await api.createCheckin(id, today);
       }
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['habits'] });
+    onSuccess: (_data, { id }) => {
+      void queryClient.invalidateQueries({ queryKey: habitKeys.all() });
+      void queryClient.invalidateQueries({ queryKey: habitKeys.detail(id) });
     },
   });
 

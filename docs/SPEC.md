@@ -197,9 +197,10 @@ decision: hard delete, not soft delete/archive-only).
 - SSO via Google and GitHub only, plus a **Demo Login** for local dev and automated testing:
   `POST /api/auth/demo-login` — no body — finds-or-creates a user with
   `provider='demo', provider_user_id='demo-user'`, sets the session, returns
-  `200 { message, userId }`. This endpoint is **gated to non-production environments only**
-  (`NODE_ENV !== 'production'` returns 404), preventing unauthenticated account impersonation in
-  production while keeping it available for development and automated tests.
+  `200 { message, userId }`. In **production** this endpoint is not a route at all: it returns
+  `404 { error: 'Not found' }` (indistinguishable from a missing endpoint, so its existence can't
+  be probed), preventing unauthenticated account impersonation on a live deployment while keeping
+  it available for development and automated tests.
 - On first sign-in via any provider, auto-create a `users` row. Do not require account linking
   across providers — one `users` row per `(provider, provider_user_id)` pair, even if the same
   human uses both Google and GitHub.
@@ -223,7 +224,7 @@ decision: hard delete, not soft delete/archive-only).
 | GET    | /google/callback        | Exchange code, upsert user, set session, redirect to `FRONTEND_URL/` — on failure redirect to `FRONTEND_URL/login?error=google_auth_failed` |
 | GET    | /github                 | Redirect to GitHub OAuth consent, redirect_uri built from `BACKEND_URL` |
 | GET    | /github/callback        | Same pattern as Google; if GitHub's profile has no public email, fall back to `GET /user/emails` and pick the `primary` (or first) address |
-| POST   | /logout                 | `await` session destroy, then respond → 204. Must not respond before destroy completes (a fire-and-forget destroy can leave the client still authenticated momentarily). |
+| POST   | /logout                 | `await` session destroy, then respond → 204. Must not respond before destroy completes (a fire-and-forget destroy can leave the client still authenticated momentarily). **Frontend requirement**: await the logout response to complete before clearing the client cache; only clear cache and navigate on successful response to prevent session-termination-bypass and fail-open vulnerabilities. |
 | GET    | /me                     | Return current user's **safe** profile (`id, provider, email, displayName, avatarUrl, createdAt` — no internal-only fields) or 401 if not logged in |
 
 `User.provider` type: `'google' | 'github' | 'demo'`.
@@ -239,7 +240,7 @@ Base path: `/api`. All routes except `/api/auth/*` require an authenticated sess
 - If a requested resource does not exist, return **404 `{ error: 'Not found' }`**.
 - If a requested resource exists but belongs to a different user, return **403 `{ error: 'Forbidden' }`**.
 
-This two-tier approach provides better security semantics (distinguishing "not found" from "not authorized") and enables clearer error feedback. Potential information-leakage concerns (user enumeration) are mitigated by rate limiting and log monitoring on auth endpoints, which are stronger defenses than conflating the two cases.
+This two-tier approach provides better security semantics (distinguishing "not found" from "not authorized") and enables clearer error feedback. Potential information-leakage concerns (user enumeration) are mitigated by the global rate limiter (300 req/15s per client IP, enforced on every route — see §10) and log monitoring, which are stronger defenses than conflating the two cases.
 
 ### Habits routes
 
@@ -403,13 +404,15 @@ reconnection (see §9).
 
 ### Global architecture rules
 
-- **Single relative-path API client.** All REST calls go through one client module
+- **Single relative-path API client (REQUIRED).** All REST calls go through one client module
   (`frontend/src/lib/api.ts`) that issues requests to **relative** paths (e.g. `/api/habits`,
   `/api/auth/me`), never an absolute `http://localhost:3000/...` origin. This is required so the
   same built frontend works through the Vite dev proxy (`/api` → backend, in dev) and through the
   nginx reverse proxy (`/api` → backend service, in Docker/prod) without code changes. Every page
   (Login, Dashboard, etc.) must use this client for auth actions (demo-login, logout, OAuth
   redirect kickoff) too — do not have individual components construct their own absolute URLs.
+  **Violation audit**: Search for `http://` or `localhost:3000` in frontend source code; any match
+  is a deployment blocker.
 - The WebSocket client builds its URL the same way: relative to `window.location`
   (`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`), which already
   routes correctly through both proxies — keep this pattern.
@@ -511,9 +514,17 @@ A `WebSocketProvider` (see below) wraps the authenticated part of the app so
 
 All backend tests use an **in-memory SQLite** database (`:memory:`), constructed fresh
 (`beforeAll`) and reset (`beforeEach`) so tests are fully isolated and can run in any order. No
-real Google/GitHub network calls — either mock the Passport strategies/HTTP calls, or (simpler)
-authenticate test sessions via the `/api/auth/demo-login` endpoint, which requires no network
-access and is part of the app's real behavior.
+real Google/GitHub network calls — authenticate test sessions via the `/api/auth/demo-login`
+endpoint, which requires no network access and is part of the app's real behavior.
+
+**Security testing:**
+- Rate limiting verified on test coverage (300 req/15s per IP, global, enforced on all routes)
+- Input validation (Zod schemas) verified via invalid request tests
+- OAuth CSRF state parameter verified on callback tests
+- Session security (httpOnly, sameSite, secure flags) verified in session tests
+- WebSocket authentication enforced at route level (preValidation) — verified via test attempts without auth
+- Error handler verified to not leak internal messages on 5xx responses
+- Ownership/authorization split (404 vs 403) verified via cross-user access tests
 
 | ID  | File               | What to test                                                                                  |
 |-----|--------------------|-------------------------------------------------------------------------------------------------|
@@ -629,8 +640,7 @@ connected user (no error message needed, just don't write).
 
 ## 14. Acceptance Checklist
 
-Before marking done, verify every item:
-
+**Functional requirements:**
 - [ ] New user can log in with Google, GitHub, and Demo Login
 - [ ] User record created automatically on first SSO sign-in
 - [ ] User can create, edit, and archive habits; status transitions enforced (both server- and client-side)
@@ -644,7 +654,23 @@ Before marking done, verify every item:
 - [ ] Milestone notifications appear in the UI for 3-, 7-, and 30-day streaks
 - [ ] Acknowledged milestones are not re-sent after reconnect, verified via a real WebSocket test client (not just an HTTP streak assertion)
 - [ ] The `ack` handler rejects/ignores acks for habits the connected user does not own
-- [ ] All 9 automated backend tests pass: `cd backend && npm test`
+
+**Security verification:**
+- [ ] Rate limiting active: verify rate-limit headers on repeated requests to `/api/auth/demo-login`
+- [ ] Input validation active: malformed requests (invalid date format, oversized name, invalid status) return 400
+- [ ] OAuth CSRF protection: callback without valid state parameter is rejected
+- [ ] Error handler active: forced 500 errors return generic message, not stack traces
+- [ ] Session security: cookies are httpOnly + sameSite + secure (in production)
+- [ ] WebSocket auth: connection without session cookie is rejected at upgrade
+- [ ] Docker: container runs as non-root user, production image has no build tools
+- [ ] Logout security: frontend awaits logout completion before clearing cache (no session-termination-bypass)
+- [ ] No hardcoded origins: grep frontend code for `http://localhost` or `localhost:3000` — should find zero matches
+- [ ] Dependency audit: no unused packages (Passport, express-session); drizzle-kit in devDependencies only
+
+**Testing & deployment:**
+- [ ] All 58 automated backend tests pass: `cd backend && npm test`
+- [ ] TypeScript strict mode passes: `cd backend && npm run typecheck`
+- [ ] E2e smoke tests: `npm run test:ui` (14+ passing, known brittle tests are test harness not product bugs)
 - [ ] The frontend issues only relative API/WS requests — no hardcoded `localhost` origins anywhere in shipped code
 - [ ] App starts from a clean clone using only the README, both in local dev and via `docker-compose up`
 

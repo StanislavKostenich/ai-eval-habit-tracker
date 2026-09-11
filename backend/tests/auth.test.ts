@@ -117,4 +117,32 @@ describe('T1 — auth (demo login, /auth/me)', () => {
     expect(me.statusCode).toBe(200);
     expect((me.json() as { id: string }).id).toBe(firstUserId);
   });
+
+  /**
+   * Demo-login production gate (docs/SPEC.md §5): with `NODE_ENV=production`,
+   * the endpoint is not available at all — it 404s, indistinguishable from a
+   * missing route, so a live deployment cannot be used to impersonate the
+   * demo user. Bootted on its own app instance (a fresh in-memory db) with
+   * production env; restored afterwards so the file's main `beforeAll` state
+   * is untouched for any later suite.
+   */
+  it('demo-login → 404 under NODE_ENV=production', async () => {
+    const prevEnv = process.env.NODE_ENV;
+    let prodApp: FastifyInstance | undefined;
+    try {
+      process.env.NODE_ENV = 'production';
+      const prodDb = createDb(':memory:');
+      migrateDb(prodDb);
+      prodApp = createApp(prodDb);
+      await prodApp.ready();
+
+      const res = await prodApp.inject({ method: 'POST', url: '/api/auth/demo-login' });
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'Not found' });
+    } finally {
+      if (prodApp) await prodApp.close();
+      if (prevEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevEnv;
+    }
+  });
 });

@@ -14,9 +14,10 @@ import { checkins, users } from '../src/db/schema.js';
  *   computed streak fields (`currentStreak`, `bestStreak`, `totalCheckins`,
  *   `completedToday`).
  * - T5: two distinct, separately-authenticated users. User B accessing
- *   user A's habit → 404 on GET, PATCH, DELETE (unified ownership policy —
- *   never 403). This uses two real, separately-authenticated sessions, not a
- *   random nonexistent id.
+ *   user A's habit → 403 { error: 'Forbidden' } on GET, PATCH, DELETE; a
+ *   genuinely missing id → 404 { error: 'Not found' } (docs/SPEC.md §6,
+ *   CLAUDE.md hard rule 3). This uses two real, separately-authenticated
+ *   sessions, not a random nonexistent id.
  *
  * All HTTP goes through Fastify's `app.inject()` against an in-memory SQLite
  * database that is constructed fresh (`beforeAll`) and reset (`beforeEach`)
@@ -239,10 +240,10 @@ describe('T2 + T5 — habits (CRUD, streaks, ownership)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // T5 — two real, separately-authenticated users; ownership = 404.
+  // T5 — two real, separately-authenticated users; ownership = 403, missing = 404.
   // ---------------------------------------------------------------------
-  describe('T5 — two distinct users, ownership returns 404 (never 403)', () => {
-    it('user B → 404 on GET, PATCH, DELETE of user A\'s habit', async () => {
+  describe('T5 — two distinct users, ownership returns 403 (missing returns 404)', () => {
+    it('user B → 403 on GET, PATCH, DELETE of user A\'s habit', async () => {
       // User A: the first-class demo user (real, separately authenticated).
       const cookieA = await demoLogin();
       const meA = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: cookieA } });
@@ -267,7 +268,7 @@ describe('T2 + T5 — habits (CRUD, streaks, ownership)', () => {
       expect((meB.json() as { id: string }).id).toBe(userIdB);
       expect(userIdA).not.toBe(userIdB);
 
-      // B accessing A's habit → 404 on GET, PATCH, DELETE (never 403).
+      // B accessing A's habit → 403 on GET, PATCH, DELETE (ownership, not missing).
       const get = await app.inject({ method: 'GET', url: `/api/habits/${habitId}`, headers: { cookie: cookieB } });
       const patch = await app.inject({
         method: 'PATCH',
@@ -277,14 +278,14 @@ describe('T2 + T5 — habits (CRUD, streaks, ownership)', () => {
       });
       const del = await app.inject({ method: 'DELETE', url: `/api/habits/${habitId}`, headers: { cookie: cookieB } });
 
-      expect(get.statusCode).toBe(404);
-      expect(patch.statusCode).toBe(404);
-      expect(del.statusCode).toBe(404);
+      expect(get.statusCode).toBe(403);
+      expect(patch.statusCode).toBe(403);
+      expect(del.statusCode).toBe(403);
       for (const r of [get, patch, del]) {
-        expect(r.json()).toEqual({ error: 'Not found' });
+        expect(r.json()).toEqual({ error: 'Forbidden' });
       }
 
-      // The 404s are ownership, not "missing": A still owns and can read it.
+      // The 403s are ownership, not "missing": A still owns and can read it.
       const getA = await app.inject({ method: 'GET', url: `/api/habits/${habitId}`, headers: { cookie: cookieA } });
       expect(getA.statusCode).toBe(200);
 
@@ -301,7 +302,7 @@ describe('T2 + T5 — habits (CRUD, streaks, ownership)', () => {
       expect(getB.statusCode).toBe(200);
     });
 
-    it('GET /habits/:id → 404 for a missing habit id (also 404, same shape)', async () => {
+    it('GET /habits/:id → 404 for a missing habit id (distinct from 403 ownership)', async () => {
       const cookie = await demoLogin();
       const res = await app.inject({
         method: 'GET',

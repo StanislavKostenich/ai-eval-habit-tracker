@@ -22,8 +22,8 @@ import { and, eq } from 'drizzle-orm';
  *   - today undo -> 204 and the habit's completedToday/totalCheckins
  *     decrement (proves undo works),
  *   - GET .../checkins?month=YYYY-MM returns the month's check-ins ascending,
- *   - unified 404 ownership: a check-in request on another user's habit is
- *     404 { error: 'Not found' } (never 403), via two real,
+ *   - ownership on the check-in routes: a request on another user's habit is
+ *     403 { error: 'Forbidden' } (404 is reserved for missing), via two real,
  *     separately-authenticated sessions (same pattern as habits.test.ts T5).
  *
  * In-memory SQLite, constructed fresh in beforeAll and reset in beforeEach so
@@ -351,10 +351,11 @@ describe('T3 + T4 — check-ins (check-in, duplicate, status, undo, list, owners
   });
 
   // ---------------------------------------------------------------------
-  // Unified 404 ownership for check-in routes (never 403).
+  // Ownership for check-in routes: 403 for another user's habit,
+  // 404 for a missing habit.
   // ---------------------------------------------------------------------
-  describe('check-in ownership -> unified 404', () => {
-    it('user B POSTing/DELETEing a check-in on user A\'s habit -> 404 { error: "Not found" }', async () => {
+  describe('check-in ownership -> 403 (missing habit -> 404)', () => {
+    it('user B POSTing/DELETEing a check-in on user A\'s habit -> 403 { error: "Forbidden" }', async () => {
       // User A: the first-class demo user (real, separately authenticated).
       const cookieA = await demoLogin();
       const meA = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: cookieA } });
@@ -368,24 +369,34 @@ describe('T3 + T4 — check-ins (check-in, duplicate, status, undo, list, owners
       expect((meB.json() as { id: string }).id).toBe(userIdB);
       expect(userIdA).not.toBe(userIdB);
 
-      // B POSTing a check-in for A's habit -> 404 (not 403, not 422).
+      // B POSTing a check-in for A's habit -> 403 (ownership; not 404, not 422).
       const post = await app.inject({
         method: 'POST',
         url: `/api/habits/${habitA}/checkins`,
         headers: { cookie: cookieB },
         payload: { date: todayISO() },
       });
-      expect(post.statusCode).toBe(404);
-      expect(post.json()).toEqual({ error: 'Not found' });
+      expect(post.statusCode).toBe(403);
+      expect(post.json()).toEqual({ error: 'Forbidden' });
 
-      // B DELETEing a check-in for A's habit -> 404.
+      // B DELETEing a check-in for A's habit -> 403.
       const del = await app.inject({
         method: 'DELETE',
         url: `/api/habits/${habitA}/checkins/${todayISO()}`,
         headers: { cookie: cookieB },
       });
-      expect(del.statusCode).toBe(404);
-      expect(del.json()).toEqual({ error: 'Not found' });
+      expect(del.statusCode).toBe(403);
+      expect(del.json()).toEqual({ error: 'Forbidden' });
+
+      // A missing habit id is 404 (distinct from 403 ownership).
+      const missing = await app.inject({
+        method: 'POST',
+        url: '/api/habits/does-not-exist/checkins',
+        headers: { cookie: cookieB },
+        payload: { date: todayISO() },
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'Not found' });
 
       // A is unaffected: still owns the habit and can check in.
       const getA = await app.inject({ method: 'GET', url: `/api/habits/${habitA}`, headers: { cookie: cookieA } });

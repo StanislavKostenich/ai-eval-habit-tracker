@@ -1,0 +1,145 @@
+name: Deploy to Azure Container Apps
+
+# Triggers:
+#   - Every push to main (auto-deploy on commit)
+#   - Manual "Run workflow" from the Actions tab (workflow_dispatch), with an
+#     optional session_secret input. If blank, a random one is generated.
+#
+# The deployment itself is performed by scripts/deploy-ci.sh, which is
+# non-interactive and reads every input from environment variables. All Azure
+# credentials and OAuth secrets come from GitHub repository secrets; the
+# non-sensitive resource-group / location / registry values come from
+# repository variables.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      session_secret:
+        description: 'Session secret (optional — a random 64-char value is generated if left blank). Must be at least 32 chars.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# `environment: production` lets you attach branch/required-reviewer
+# protection rules to the "production" environment in repo settings if you
+# want a manual approval gate before each deploy. Without any rules configured,
+# the job runs normally.
+concurrency:
+  group: deploy-azure-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & deploy to Azure
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve SESSION_SECRET
+        id: secrets
+        env:
+          PROVIDED: ${{ github.event.inputs.session_secret }}
+        run: |
+          if [[ -n "$PROVIDED" ]]; then
+            # Caller supplied an explicit secret (e.g. to keep it stable
+            # across redeploys so existing sessions don't get invalidated).
+            SESSION_SECRET="$PROVIDED"
+          else
+            SESSION_SECRET="$(openssl rand -hex 32)"
+          fi
+          # Echo as an output so the deploy step can read it without it ever
+          # appearing in the workflow log as a literal secret value.
+          echo "session_secret=$SESSION_SECRET" >> "$GITHUB_OUTPUT"
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+          az version
+
+      - name: Deploy to Azure Container Apps
+        env:
+          # Azure service principal (secrets)
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Non-sensitive Azure topology (variables)
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          AZURE_REGISTRY_LOGIN_SERVER: ${{ vars.AZURE_REGISTRY_LOGIN_SERVER }}
+          # OAuth (secrets)
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.GITHUB_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GITHUB_CLIENT_SECRET }}
+          # Session (resolved above)
+          SESSION_SECRET: ${{ steps.secrets.outputs.session_secret }}
+        run: |
+          bash scripts/deploy-ci.sh
+        # Capture the FRONTEND_URL line the script prints, for the summary.
+        id: deploy
+        # (deploy-ci.sh prints FRONTEND_URL=<url> as its last line; we don't
+        # parse it here because the az CLI can re-fetch it in the summary step.)
+
+      - name: Fetch deployed frontend URL
+        if: success()
+        id: url
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+          az login --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID" \
+            --output none
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          FQDN=$(az containerapp show \
+            --name frontend-app \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.configuration.ingress.fqdn' -o tsv)
+          echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
+          echo "frontend_url=https://$FQDN" >> "$GITHUB_OUTPUT"
+
+      - name: Deployment summary (success)
+        if: success()
+        run: |
+          {
+            echo "## ✅ Deployment Successful"
+            echo ""
+            echo "**Frontend URL:** [https://${{ steps.url.outputs.fqdn }}](https://${{ steps.url.outputs.fqdn }})"
+            echo ""
+            echo "Resource group: \`${{ vars.AZURE_RESOURCE_GROUP }}\`"
+            echo "Registry: \`${{ vars.AZURE_REGISTRY_LOGIN_SERVER }}\`"
+            echo ""
+            echo "### Next steps"
+            echo "1. Register the frontend URL as an OAuth redirect URI with Google and GitHub (see \`docs/SETUP_CI_CD.md\`)."
+            echo "2. Open the URL above and test login."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deployment summary (failure)
+        if: failure()
+        run: |
+          {
+            echo "## ❌ Deployment Failed"
+            echo ""
+            echo "Check the logs above for the failing step. Common causes:"
+            echo "- Missing or invalid Azure service principal credentials"
+            echo "- Missing GitHub repository secrets or variables (names are case-sensitive)"
+            echo "- SESSION_SECRET shorter than 32 characters"
+            echo "- ACR name not globally unique"
+            echo "- Backend FQDN not yet resolvable (re-run after a couple of minutes)"
+          } >> "$GITHUB_STEP_SUMMARY"

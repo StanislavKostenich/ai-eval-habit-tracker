@@ -59,11 +59,6 @@ describe('T6–T9 — WebSocket milestone engine (real ws client)', () => {
     return { cookie, userId: body.userId };
   }
 
-  /** UTC "today" — same rule as the rest of the app (docs/SPEC.md §7). */
-  function todayISO(): string {
-    return new Date().toISOString().slice(0, 10);
-  }
-
   /** `YYYY-MM-DD` for `days` before UTC today (0 = today). */
   function daysAgoISO(days: number): string {
     const d = new Date();
@@ -365,21 +360,35 @@ describe('T6–T9 — WebSocket milestone engine (real ws client)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // Extra (lightweight) — an unauthenticated upgrade is closed with 1008.
+  // Extra (lightweight) — an unauthenticated upgrade is rejected with 401
+  // at the route level (preValidation) BEFORE the handshake completes
+  // (docs/SPEC.md §8). The upgrade never becomes a WebSocket: the client
+  // observes a connection error (401), not an open-then-close.
   // ---------------------------------------------------------------------
-  it('unauthenticated upgrade (no cookie) is closed with code 1008', async () => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-    const closeInfo = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timed out waiting for close')), 4000);
-      ws.on('close', (code, reason) => {
+  it('unauthenticated upgrade (no cookie) is rejected with 401 pre-handshake', async () => {
+    const outcome = await new Promise<{ opened: boolean; errorStatus?: number }>((resolve) => {
+      const timer = setTimeout(() => resolve({ opened: false }), 4000);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      ws.on('open', () => {
         clearTimeout(timer);
-        resolve({ code, reason: reason.toString() });
+        resolve({ opened: true });
       });
-      ws.on('error', (err) => {
+      ws.on('unexpected-response', (_req, res) => {
         clearTimeout(timer);
-        reject(err);
+        resolve({ opened: false, errorStatus: res.statusCode });
+      });
+      ws.on('error', () => {
+        // A 401 on the upgrade surfaces as an error; `unexpected-response`
+        // carries the actual status code, so a bare error just means "not open".
+        clearTimeout(timer);
+        resolve({ opened: false });
+      });
+      ws.on('close', () => {
+        clearTimeout(timer);
+        resolve({ opened: false });
       });
     });
-    expect(closeInfo.code).toBe(1008);
+    expect(outcome.opened).toBe(false);
+    expect(outcome.errorStatus).toBe(401);
   });
 });

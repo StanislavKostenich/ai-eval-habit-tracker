@@ -312,3 +312,116 @@ every single assistant message in every session carries `usage.input_tokens=0`
 **Verified against the actual §I failing session** (transcript with the 127,073-token request): hook fires at est ≈ 48k (~37% of wall) — mid-session, well before the wall. A tool-heavy session crosses the 39k line around ~55k raw transcript chars, typically long before the real request hits 127k.
 
 **Residual honesty:** on a *pathologically* tool-heavy session (×5+ divergence with a small transcript) even this can fire late; and text-only light sessions now get an early nag (their est ≈ real). Both are acceptable vs a silent 400. The durable fix remains gateway-side consistent usage; run the probe at session start.
+
+## J. 2026-09-11 re-incident — `usage:0` is **back and persistent** (417/417), 15.4k UI vs 127k real, error is now a gateway **rewrite**
+
+Third overflow incident, and the most informative. The §H "RESOLVED" is **wrong as a durable statement**: the client-side config fix (§H table: 131072 / 120000 / 85) is durable and correct, but the gateway real-usage fix it depended on **regressed again** — and this time it is *persistent within sessions*, not just flaky across days.
+
+### The report
+
+User saw, in one session:
+
+```
+API Error: 400  Estimated input plus requested output exceeds the Qwen context
+window; compact the conversation and retry.
+```
+
+while `/context` simultaneously showed **`15.4k / 120k tokens (13%)`** for `qwen3.8-27b`.
+
+### Evidence (measured 2026-09-11, this session)
+
+1. **The probe still passes** — but only on one-shot requests:
+   - FIT (25-turn): `HTTP 200`, `usage.input_tokens=5348` (real, non-zero).
+   - OVER (620-turn): `HTTP 400`, `error.type=context_length_exceeded` (preflight intact).
+   - So the gateway's preflight and the *one-shot* usage path both work **right now**.
+
+2. **Every sustained session returns `usage:0`.** Across the 4 most recent transcripts in this project, **all 417 assistant messages carry `usage.input_tokens:0`** (92/92, 152/152, 161/161, 12/12). The "real usage" validated in §C/§H is **not live on the session stream** — it is real on isolated probe requests and zero on everything a real Claude Code session sends.
+
+3. **`/context` (15.4k) and the 400 are not contradictory** — they measure different things (re-confirms §G):
+   - `/context` = `chars/4` of the **in-memory conversation only** (user + assistant text since last compact). It predicts *when auto-compact fires*, **not** the request size.
+   - The gateway's 400 = `input_tokens + max_tokens` of the **actual wire request** (full re-sent history + system prompt + all 65 tool/MCP schemas + prompt-cache expansion).
+   - Measured on the failed session's transcript: 191 messages, **197,671 chars**, **no compact boundary ever fired** → ~59.9k tokens at an honest `chars/3.3`, ~113.8k at the hook's pessimistic `chars/1.8 + 4000` schema. The real wire request (with system + tool schemas) is at/above the 131,072 wall — consistent with the 127,073 figure from the prior incident. So the UI understated the real request by **~×4–×8**, exactly the §G tool-heavy divergence.
+
+4. **The 400 message is a gateway *rewrite*, not a raw Qwen error and not in the client.** Grep of the Claude Code binaries (2.1.267 **and** 2.1.268) for `Qwen context window` → **zero hits**. The original raw Qwen error carried the arithmetic (`input_tokens`, `value=127073`, total, limit — see §A.3 / §G); the current message is a humanized sentence that **drops the numbers**. That is a UX improvement but it hides the exact `input + max_tokens = N > 131072` breakdown that made the §A diagnosis possible. The gateway's `context_length_exceeded` preflight (confirmed working by the probe) is being reworded into this string.
+
+### Why all three safety nets failed at once (single root cause)
+
+| Net | Why it failed under `usage:0` |
+|---|---|
+| Auto-compact (102k trigger) | Fed by the same usage telemetry → with `input_tokens:0` the client believes the session is tiny (the 15.4k / 13% display), so the trigger never fires. Session grows to the wall. |
+| `/compact` | Re-sends the full ~127k history → `127073 + 4000 = 131073` = 1 over → the 400. |
+| `context-guard.py` hook | Prefers real usage, finds 0, falls back to the chars estimate — a *lower bound* that undercounts by a session-dependent ×2–×5. Warns late or not at all vs the true wall. |
+
+**One root cause:** the gateway stopped returning real usage on sustained sessions. Fix the passthrough and all three recover with **no** client-side change.
+
+### Why the client cannot self-fix this
+
+The client config is already correct and was **not** the problem:
+
+```
+CLAUDE_CODE_MAX_CONTEXT_TOKENS    = 131072   # anchors to the real window
+CLAUDE_CODE_AUTO_COMPACT_WINDOW   = 120000
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE   = 85       # trigger at 120000 * 0.85 = 102k
+CLAUDE_CODE_MAX_OUTPUT_TOKENS     = 4000
+```
+
+- Auto-compact reads the same telemetry the hook reads — it is structurally blind to `usage:0`.
+- The hook's fallback is a lower bound; no fixed ratio calibrates transcript chars to the wall on tool-heavy sessions (§I).
+- The probe's one-shot FIT leg can return a real count even while the session stream returns zero (observed today). It is a canary, not a guarantee.
+
+**The durable fix is gateway-side.** See **`docs/gateway-usage-debug-spec.md`** for the full debug plan (hypotheses H1–H5, telemetry requests, acceptance gate) and the gateway fix spec (GW-1 always-return-real-usage including the streaming terminal event; GW-2 preflight count == returned usage; GW-3 keep the arithmetic in the 400 body; GW-4 stable tokenizer; GW-5 the separate `gpt-5-5` 403 identity gate).
+
+### Most likely single cause (for the gateway team)
+
+**H1 — the streaming terminal event.** The one-shot probe (non-stream-style, single request) gets real usage; the sustained *streaming* session does not. If `usage` is only populated on the non-stream path and the final SSE `message_delta` is zeroed, that is the whole bug and a one-line fix. Second most likely: H2 (prompt-caching path suppresses the count) or H4 (a specific deploy/backend instance around the 2026-09-10 → 09-11 window).
+
+### Immediate actions (client-side, already taken / to take)
+
+1. **This session:** `/compact` is safe (real input ~115k, under the wall). If `/compact` itself 400s, `/clear` and restart.
+2. **Every long session:** run `node /tmp/cc-test/probe_overflow.js` at start — the FIT leg flags a `usage:0` regression on one-shot requests *before* a session hits the wall. (It passed today because one-shot still returns real usage; if even that starts returning 0, auto-compact is fully blind.)
+3. **Do not** lower `CLAUDE_CODE_AUTO_COMPACT_WINDOW` further to "compensate" for `usage:0` — that trades a 400 for over-aggressive compaction and masks the real bug.
+4. **Report to gateway owners** (the durable fix): real usage is real on one-shot but **0/417** on sustained sessions as of 2026-09-11; and the rewritten 400 hides the token arithmetic — restore `input_tokens`/`max_tokens`/`limit` in the error body.
+
+### Doc corrections this pass
+
+- **§H "RESOLVED" / "client config fix is durable, gateway fix is not durable"** — confirmed and sharpened: the gateway real-usage fix is not just "not durable," it is **0/417 on the session stream** while still real on one-shots. The §H §G "DONE (2026-09-11)" note about the hook reading real usage is therefore **contingent** — the hook is back on its fallback path.
+- **§A / §F "100k vs 131k" framing** — superseded for this incident: the 15.4k UI is the §G `chars/4` in-memory estimate, and the 127k real is the wire request. Same §G mechanism, third observation.
+- New companion doc: **`docs/gateway-usage-debug-spec.md`** (debug plan + gateway fix spec + definition of done).
+
+## K. Gateway team response (2026-09-11, in Ukrainian) — root-cause hypothesis + timeline
+
+### What they said (verbatim translation)
+
+> "The pod itself needs to be restarted — probably only this evening. But today we finish testing the model in the evening and collect feedback from the devs. We can try to do this on Monday, and there's also a task to spin up 8 GPUs with GLM-5.3 if resources are available."
+>
+> "Recommendation: add `--tokenizer Qwen/Qwen3.8-27B` to the RunPod launch, verify the checksum, and for the Gateway it's better to embed that same tokenizer version into the Docker image. Then the Gateway won't depend on the pod's availability for token counting."
+
+### Interpretation — this is a concrete root-cause hypothesis
+
+Their answer points to a **tokenizer availability race**: the RunPod pod sometimes lacks the `Qwen/Qwen3.8-27B` tokenizer (cold start / unpulled), so **preflight token counting falls back to zero** — which is exactly the observed "one-shot gets real count, sustained session gets `usage:0`" split, and the same drift that made the "same" 620-turn bytes count 122,881 → 86,598 between 09-10 and 09-11 (§F.2). This maps to the **H1–H5** set in the debug spec as "tokenizer availability" (closest to H4 per-instance, but structural, not a deploy). It is a **stronger, more specific** candidate than H1 (streaming terminal event). **To confirm:** the Phase A probe (non-stream vs stream on the same payload) — if the count is zero on *both* after a pod restart until the tokenizer is warm, it's the race, not the streaming path.
+
+Their two-part fix (client-visible impact):
+1. **`--tokenizer Qwen/Qwen3.8-27B` on the RunPod launch + checksum verify** — makes the pod count tokens deterministically.
+2. **Embed that same tokenizer version in the Gateway Docker image** — Gateway no longer depends on the pod for token counting. This is the durable half; the pod restart alone will regress on the next cold start.
+
+**Net: the fix is real and targets the right layer, but it is not live until the Gateway image change ships.** The pod restart is a stopgap.
+
+### Timeline (their words)
+
+| When | What |
+|---|---|
+| Today (09-11) | finish model testing; collect dev feedback. No fix. |
+| Evening (09-11) | pod restart "maybe" — stopgap only. |
+| Monday (09-14) | attempt the actual fix (tokenizer embed). |
+| Parallel (unscheduled) | spin up 8 GPUs with **GLM-5.3** if resources are available — a **separate** workload, not the usage fix. Do not conflate. |
+
+### What this does **not** answer (still open)
+
+- No diagnostic header (debug spec §3.3) → we still cannot verify `upstream == gateway_computed == returned` per request. GW-2/GW-3/GW-4 remain unverified.
+- No confirmation of the H1 (streaming) vs H2 (caching) sub-hypothesis — their tokenizer-race answer implies the bug is *upstream of* the response path (counting is zero, so there's nothing to forward), which would make H1/H2 moot. The Phase A probe is the only way to tell.
+- The `gpt-5-5` 403 identity gate (GW-5) is untouched.
+- "Verify the checksum" is unverified — we have no checksum of their tokenizer to compare against. GW-4 (stable tokenizer) is still a SHOULD, not done.
+
+### Client-side plan (unchanged, now with a known exit)
+
+Until Monday's Gateway image change lands: keep the client config as-is (131072 / 120000 / 85 / 4000), run `probe_overflow.js` at the start of every long session, treat `usage:0` on the session stream as the expected state, and rely on `context-guard.py`'s fallback (pessimistic `chars/1.8 + 4000`, 0.30 estimate-fraction) as the only working safety net. **Do not** lower the compact window further to compensate.

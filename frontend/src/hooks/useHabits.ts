@@ -21,6 +21,17 @@ export function useHabits(filters: HabitsQuery) {
   return useQuery({
     queryKey: habitKeys.list(filters),
     queryFn: () => api.listHabits(filters),
+    // The list is refetched whenever a filter changes; don't re-fetch stale
+    // pages in the background (e.g. a prior search result) while the
+    // dashboard is open — the query is kept fresh by the filter change
+    // itself and by mutation invalidation.
+    refetchOnWindowFocus: false,
+    staleTime: 60_000,
+    // Vite's dev server can serve a `stale-while-revalidate` response during
+    // HMR — a stale GET resolving after a newer one would flash stale data.
+    // Abort the in-flight request when a newer one with the same key starts
+    // (see `withAbort` in lib/api.ts); the abort is a no-op for a query
+    // that was cancelled by React Query itself.
   });
 }
 

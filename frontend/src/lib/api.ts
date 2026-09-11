@@ -13,6 +13,30 @@ import type {
  * proxy and the nginx reverse proxy unchanged.
  */
 
+/**
+ * Optional AbortSignal for in-flight request cancellation. Vite's dev server
+ * can serve a `stale-while-revalidate` response during HMR — if a stale GET
+ * resolves after a newer one, its `body.json()` promise resolves late and its
+ * (wrong) payload lands in the TanStack Query cache, flashing stale data.
+ * Aborting the request when a newer one with the same key starts prevents
+ * those late resolutions.
+ */
+declare global {
+  interface Window {
+    __apiInflight?: Map<string, AbortController>;
+  }
+}
+
+function withAbort(path: string, options: RequestInit): RequestInit {
+  const key = `${options.method ?? 'GET'} ${path}`;
+  const prev = window.__apiInflight?.get(key);
+  if (prev) prev.abort();
+  const controller = new AbortController();
+  if (!window.__apiInflight) window.__apiInflight = new Map();
+  window.__apiInflight.set(key, controller);
+  return { ...options, signal: controller.signal };
+}
+
 /** Uniform error shape for non-2xx responses (SPEC §6). */
 export class ApiError extends Error {
   readonly status: number;
@@ -27,6 +51,7 @@ async function request<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const merged = withAbort(path, options);
   const res = await fetch(path, {
     credentials: 'same-origin',
     headers: {
@@ -34,8 +59,11 @@ async function request<T>(
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
     },
-    ...options,
+    ...merged,
   });
+  // Drop the in-flight entry so a later request for the same key can
+  // install its own controller without aborting an already-settled one.
+  window.__apiInflight?.delete(`${options.method ?? 'GET'} ${path}`);
 
   if (res.status === 204) {
     return undefined as T;
@@ -63,7 +91,7 @@ async function request<T>(
   return body as T;
 }
 
-function toQueryString(params: Record<string, string | undefined>): string {
+export function toQueryString(params: Record<string, string | undefined>): string {
   const entries = Object.entries(params).filter(
     (_entry): _entry is [string, string] => _entry[1] !== undefined,
   );

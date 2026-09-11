@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import type { FastifyInstance } from 'fastify';
-import { and, eq } from 'drizzle-orm';
 import fastifyCookie from '@fastify/cookie';
-import { WebSocket } from 'ws';
+import { and, eq } from 'drizzle-orm';
+import { WebSocketServer } from 'ws';
+import type WebSocket from 'ws';
 import type { AppDatabase } from '../db/index.js';
 import { checkins, habits, milestoneNotifications, users } from '../db/schema.js';
 import { calculateStreaks } from '../utils/streaks.js';
@@ -11,8 +13,23 @@ import { getTodayISO } from '../utils/date.js';
 /**
  * WebSocket milestone engine (docs/SPEC.md §8).
  *
- * Registers a single `GET /ws` (HTTP upgrade) route behind the app's session
- * cookie. The message protocol is a JSON envelope `{ type, payload }`:
+ * Attaches a `ws` WebSocketServer to the app's HTTP server and accepts the
+ * `GET /ws` upgrade. **Auth is enforced at the route level, before the
+ * WebSocket handshake completes**: an unauthenticated upgrade is answered
+ * with a plain `401` HTTP response and the socket is destroyed — the
+ * connection is never upgraded (docs/SPEC.md §8: "Do not move auth logic into
+ * the handler after the upgrade succeeds, since that leaves a window where the
+ * connection is accepted but not yet authorized").
+ *
+ * The session is resolved directly from the upgrade request's `cookie` header
+ * (see `resolveSessionUserId`): parse the `sessionId` cookie, unsign it with
+ * the app's `SESSION_SECRET` (the same signer `@fastify/session` uses —
+ * `@fastify/cookie`'s `Signer`, cookie name `sessionId`), look the row up in
+ * the SQLite session store, and confirm the user still exists. This mirrors
+ * `@fastify/session`'s own deserialization, applied to the raw upgrade request
+ * (which does not run Fastify's hook pipeline).
+ *
+ * The message protocol is a JSON envelope `{ type, payload }`:
  *
  *   Server → Client
  *     `connected`   { userId }                                           on upgrade
@@ -32,50 +49,27 @@ import { getTodayISO } from '../utils/date.js';
  *     before writing (security-critical: without it, a user could forge acks
  *     for another user's habits and suppress their milestones). A missing or
  *     not-owned habit is silently ignored.
- *
- * Ownership convention: an unauthenticated upgrade is rejected with close code
- * 1008 (policy violation) (docs/SPEC.md §8).
- *
- * Session auth on the upgrade: `@fastify/websocket` v10 hands the handler the
- * socket AFTER the HTTP upgrade. The upgrade request is dispatched in the
- * server's `upgrade` handler and does NOT run Fastify's normal hook pipeline,
- * so `@fastify/session`/`@fastify/cookie` (which parse + load the session in
- * `onRequest`) never populate `request.session` for the WS route. We therefore
- * resolve the session ourselves from the raw `cookie` header: parse it with
- * `@fastify/cookie`'s `parse` (which URL-decodes values the way the HTTP path
- * does), unsign the `sessionId` with the app's session secret (the same secret
- * `createApp` uses, via `process.env.SESSION_SECRET` and the dev fallback),
- * look the session row up in the SQLite store, and confirm the user still
- * exists. This reuses the app's own utilities and secret.
- *
- * The upgraded socket is attached to the raw request by the plugin under a
- * symbol and destroyed by its `onResponse` hook when `request.ws` is true
- * (without checking `reply.hijacked`). We delete that symbol from the raw
- * request once the `ws` socket is ours so the plugin does not tear down the
- * connection.
  */
 
 const MILESTONES = [3, 7, 30] as const;
 type MilestoneDays = (typeof MILESTONES)[number];
 
-/** Dev-only fallback for SESSION_SECRET — must stay in sync with src/app.ts. */
-const DEV_SESSION_SECRET_FALLBACK = 'dev-only-insecure-session-secret-0123456789';
+// WebSocket readyState constants (ws library): CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3.
+// We use the numeric literal 1 (OPEN) because `import type WebSocket` is
+// type-only — the `WebSocket` identifier is not available as a runtime value.
+const WS_OPEN = 1;
 
-/** Shape of the `unsign` method we rely on (the `SignerBase` interface is
- *  declared inside the `@fastify/cookie` namespace but not re-exported as a
- *  named type, so we declare the slice we use). */
-interface SignerLike {
-  unsign: (value: string) => { valid: boolean; value?: string };
+/** The session cookie name `@fastify/session` uses by default. */
+const SESSION_COOKIE_NAME = 'sessionId';
+
+function send(socket: WebSocket, type: string, payload: Record<string, unknown>): void {
+  if (socket.readyState !== WS_OPEN) return;
+  socket.send(JSON.stringify({ type, payload }));
 }
 
-/** The `@fastify/cookie` Signer constructor. `parse` and `Signer` are only
- *  reachable at runtime (and in types) through the `fastifyCookie` namespace
- *  object, not as top-level named exports, so we access them there. */
-const fc = fastifyCookie as unknown as {
-  parse: (cookieHeader: string) => Record<string, string>;
-  Signer: new (secret: string) => SignerLike;
-};
-const SignerCtor = fc.Signer;
+function isMilestoneDays(value: unknown): value is MilestoneDays {
+  return MILESTONES.includes(value as MilestoneDays);
+}
 
 /** The underlying better-sqlite3 client, reachable off the Drizzle instance. */
 type RawSqliteClient = import('better-sqlite3').Database;
@@ -84,21 +78,32 @@ function rawClient(db: AppDatabase): RawSqliteClient {
 }
 
 /**
- * Resolves the authenticated user id for a WS upgrade request, or `null` when
- * the request is not authenticated. Mirrors what `@fastify/session` does on
- * the HTTP path, applied to the raw upgrade request.
+ * `@fastify/cookie`'s `Signer` constructor. It is only reachable at runtime
+ * (and in types) through the `fastifyCookie` namespace object, not as a top-
+ * level named export, so we access it there.
  */
-function resolveSessionUserId(db: AppDatabase, raw: { headers: Record<string, unknown> }): string | null {
+interface SignerLike {
+  unsign: (value: string) => { valid: boolean; value?: string };
+}
+const SignerCtor = (fastifyCookie as unknown as { Signer: new (secret: string) => SignerLike }).Signer;
+
+/**
+ * Resolves the authenticated user id for a WS upgrade request, or `null` when
+ * the request is not authenticated. Mirrors `@fastify/session`'s
+ * deserialization, applied to the raw upgrade request.
+ */
+function resolveSessionUserId(db: AppDatabase, raw: IncomingMessage): string | null {
   const header = raw.headers.cookie;
   if (typeof header !== 'string') return null;
 
-  // `@fastify/cookie`'s parse URL-decodes values (the ws client sends the
+  // `@fastify/cookie`'s `parse` URL-decodes values (the ws client sends the
   // signed cookie URL-encoded); this matches the HTTP path's behavior.
-  const cookies = fc.parse(header);
-  const sid = cookies['sessionId'];
+  const cookies = (fastifyCookie as unknown as { parse: (h: string) => Record<string, string> }).parse(header);
+  const sid = cookies[SESSION_COOKIE_NAME];
   if (typeof sid !== 'string' || sid.length === 0) return null;
 
-  const secret = process.env.SESSION_SECRET || DEV_SESSION_SECRET_FALLBACK;
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) return null;
   const { valid, value } = new SignerCtor(secret).unsign(sid);
   if (!valid || typeof value !== 'string') return null;
 
@@ -120,48 +125,68 @@ function resolveSessionUserId(db: AppDatabase, raw: { headers: Record<string, un
   return user ? parsed.userId : null;
 }
 
-// WebSocket readyState constants (ws library): CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3.
-// We use the numeric literal 1 (OPEN) because `import type WebSocket from 'ws'` is
-// type-only — the `WebSocket` identifier is not available as a runtime value.
-const WS_OPEN = 1;
-
-function send(socket: WebSocket, type: string, payload: Record<string, unknown>): void {
-  if (socket.readyState !== WS_OPEN) return;
-  socket.send(JSON.stringify({ type, payload }));
-}
-
-function isMilestoneDays(value: unknown): value is MilestoneDays {
-  return MILESTONES.includes(value as MilestoneDays);
-}
-
 /**
- * Registers the `GET /ws` route. `@fastify/websocket` v10 passes the raw
- * `ws.WebSocket` and the Fastify request.
+ * Registers the WebSocket milestone engine.
+ *
+ * Attaches a `ws` WebSocketServer to `app.server` (the app's HTTP server) and
+ * handles the `GET /ws` upgrade. Must be called once the app's HTTP server
+ * exists (i.e. the plugin has been registered, before the server has started
+ * listening — `attach()` only records the listener).
  */
 export default async function wsRoutes(app: FastifyInstance): Promise<void> {
   const db = (app as unknown as { db: AppDatabase }).db;
 
-  app.get('/ws', { websocket: true }, (socket: WebSocket, req) => {
-    // Prevent the plugin's `onResponse` hook from destroying the upgraded
-    // socket. The plugin stashes the raw net socket on `request.raw` under a
-    // private symbol and, in its `onResponse` hook, calls `.destroy()` on it
-    // whenever `request.ws` is true (without checking `reply.hijacked`). We
-    // replace that stashed socket with a no-op stub so the `onResponse` hook
-    // has nothing real to destroy. The `ws` `socket` we hold is the same
-    // underlying connection, so it is unaffected.
-    const raw = req.raw as unknown as Record<symbol, unknown>;
-    for (const sym of Object.getOwnPropertySymbols(raw)) {
-      const val = raw[sym];
-      if (val && typeof (val as { destroy?: unknown }).destroy === 'function') {
-        raw[sym] = { destroy: () => {} };
-      }
+  const wss = new WebSocketServer({ noServer: true });
+
+  // Route-level auth (docs/SPEC.md §8): reject unauthenticated upgrades with a
+  // 401 BEFORE the handshake completes. The socket is destroyed immediately,
+  // so the connection is never upgraded and no window exists in which the
+  // connection is accepted but not yet authorized.
+  app.server.on('upgrade', (req: IncomingMessage, socket: import('node:net').Socket, head: Buffer) => {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    if (url.pathname !== '/ws') {
+      // Not our route — destroy (no other upgrade routes exist in this app).
+      socket.destroy();
+      return;
     }
 
-    const userId = resolveSessionUserId(db, req.raw);
-
-    // Reject unauthenticated upgrades (docs/SPEC.md §8 → 1008 policy violation).
+    const userId = resolveSessionUserId(db, req);
     if (!userId) {
-      socket.close(1008, 'Unauthorized');
+      // Reject with a real, flushed 401 response. A bare
+      // `new ServerResponse(req).end()` + immediate `socket.destroy()` loses
+      // the buffered bytes in practice (the client observes a raw hang-up,
+      // not the 401), so the status line and headers are written directly to
+      // the socket, the body is flushed with `end`, and teardown waits for
+      // the write to complete.
+      const body = JSON.stringify({ error: 'Unauthorized' });
+      socket.write(
+        'HTTP/1.1 401 Unauthorized\r\n' +
+          'Content-Type: application/json\r\n' +
+          'Content-Length: ' + Buffer.byteLength(body) + '\r\n' +
+          'Connection: close\r\n' +
+          '\r\n' +
+          body,
+      );
+      socket.end(() => socket.destroy());
+      return;
+    }
+
+    // Authenticated: complete the handshake, then hand the socket to wss.
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+      void userId; // userId is re-resolved from the socket's request in onConnection
+    });
+  });
+
+  // Per-connection message handling. The socket's originating request carries
+  // the same cookie the upgrade used, so we re-resolve the session to obtain
+  // the authenticated user id for this connection.
+  wss.on('connection', (socket: WebSocket, req: IncomingMessage) => {
+    const userId = resolveSessionUserId(db, req);
+    if (!userId) {
+      // Should not happen (auth already enforced at upgrade), but be safe:
+      // close without a greeting.
+      socket.close();
       return;
     }
 
@@ -185,8 +210,8 @@ export default async function wsRoutes(app: FastifyInstance): Promise<void> {
     });
 
     socket.on('error', (err: Error) => {
-      // Swallow socket errors (e.g. client vanished mid-message). The plugin's
-      // teardown handles the connection lifecycle.
+      // Swallow socket errors (e.g. client vanished mid-message); the `ws`
+      // library's own teardown handles the connection lifecycle.
       void err;
     });
 

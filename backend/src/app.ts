@@ -1,16 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifySession from '@fastify/session';
-import fastifyWebsocket from '@fastify/websocket';
-import passport from 'passport';
-import type {
-  FastifyReply,
-  FastifyRequest,
-  HookHandlerDoneFunction,
-} from 'fastify';
 import type { AppDatabase } from './db/index.js';
-import { registerPassport } from './auth/passport.js';
 import { createSessionStore } from './session/sqliteStore.js';
+import { createRateLimiter, registerRateLimit, type RateLimiter } from './middleware/rateLimit.js';
 import authRoutes from './routes/auth.js';
 import habitRoutes from './routes/habits.js';
 import wsRoutes from './ws/handler.js';
@@ -19,34 +12,19 @@ import wsRoutes from './ws/handler.js';
 const SESSION_MAX_AGE_SEC = 24 * 60 * 60;
 
 /**
- * Dev-only fallback for SESSION_SECRET. Never used in production: boot
- * hard-fails there when SESSION_SECRET is missing or shorter than 32 chars
- * (docs/SPEC.md §3).
+ * SESSION_SECRET is required in **every** environment (docs/SPEC.md §3): boot
+ * hard-fails when it is missing or shorter than 32 characters. There is no
+ * development fallback — that would let a forgotten secret silently sign
+ * session cookies with a known constant. Developers set it in `.env`; CI and
+ * Docker provide it explicitly.
  */
-const DEV_SESSION_SECRET_FALLBACK = 'dev-only-insecure-session-secret-0123456789';
-
-function resolveSessionSecret(log: { warn: (msg: string) => void }): string {
-  const isProduction = process.env.NODE_ENV === 'production';
+function resolveSessionSecret(): string {
   const secret = process.env.SESSION_SECRET;
-
-  if (isProduction) {
-    if (!secret || secret.length < 32) {
-      throw new Error('SESSION_SECRET must be set to a random string of at least 32 characters in production');
-    }
-    return secret;
-  }
-
-  if (!secret) {
-    log.warn(
-      `SESSION_SECRET not set — using an insecure development fallback (set SESSION_SECRET in .env; production boot hard-fails without one)`,
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      'SESSION_SECRET must be set to a random string of at least 32 characters (all environments — copy .env.example to .env)',
     );
-    return DEV_SESSION_SECRET_FALLBACK;
   }
-
-  if (secret.length < 32) {
-    log.warn(`SESSION_SECRET is shorter than 32 characters — weak secret in use`);
-  }
-
   return secret;
 }
 
@@ -59,15 +37,33 @@ function resolveSessionSecret(log: { warn: (msg: string) => void }): string {
  * and the Passport strategies both need it. The caller is responsible for
  * having run migrations on that database before requests arrive
  * (`src/index.ts` and the tests do this).
+ *
+ * `opts.limiter` lets tests inject a deterministic (fixed-clock, low-budget)
+ * rate limiter to exercise the 429 path; production uses the default
+ * (300 requests / 15s per IP).
  */
-export function createApp(db: AppDatabase): FastifyInstance {
+export function createApp(db: AppDatabase, opts?: { limiter?: RateLimiter }): FastifyInstance {
   const app = Fastify({
     logger: process.env.NODE_ENV === 'test' ? false : true,
+    // The production backend sits behind nginx (frontend/nginx.conf), which is
+    // the ONLY proxy hop and appends the real client IP to X-Forwarded-For;
+    // in dev it listens directly with no proxy. `trustProxy: 1` trusts exactly
+    // one hop, so `request.ip` resolves to the last (proxy-appended) XFF entry
+    // when proxied and the socket IP otherwise — and, critically, a
+    // client-controlled FIRST XFF entry is ignored (a bare `true` would trust
+    // the whole chain and resolve to the first entry, i.e. trivially spoofable).
+    // The rate limiter keys on `request.ip`, so this is its real client IP.
+    trustProxy: 1,
   });
 
   (app as unknown as { db: AppDatabase }).db = db;
 
   void app.register(fastifyCookie);
+
+  // Rate limiting (docs/SPEC.md §6/§12) — registered first so it guards every
+  // route, including the unauthenticated auth endpoints, and rejects floods
+  // before session deserialization runs. In-memory, single-process.
+  registerRateLimit(app, opts?.limiter ?? createRateLimiter());
 
   // SQLite-backed session store (docs/SPEC.md §5: sessions survive restarts;
   // `connect-sqlite3` on the app's own connection, so one file holds both the
@@ -76,7 +72,7 @@ export function createApp(db: AppDatabase): FastifyInstance {
   const { store: sessionStore } = createSessionStore(sqlite);
 
   void app.register(fastifySession, {
-    secret: resolveSessionSecret(app.log),
+    secret: resolveSessionSecret(),
     // The SQLite-backed store (src/session/sqliteStore.ts) matches the
     // express-session store shape at runtime; it is passed as `never` only
     // because `@fastify/session`'s bundled `SessionStore` interface is
@@ -93,48 +89,17 @@ export function createApp(db: AppDatabase): FastifyInstance {
     },
   });
 
-  // Passport (docs/SPEC.md §5, Option A): the strategies are configured here
-  // and actually invoked from the auth routes via passport.authenticate.
-  // passport.session() makes passport read/write its login marker in
-  // req.session — with serializeUser/deserializeUser round-tripping only the
-  // user id, so the session holds just `userId` (see auth/passport.ts).
-  registerPassport(db, app.log);
-  // Passport's middleware is typed for Express's Request/Response; Fastify's
-  // raw node request/response pair satisfies the runtime contract. The casts
-  // are structural (see the `http` module augmentation in src/types.d.ts).
-  // Passport's middleware is typed for Express's Request/Response; Fastify's
-  // raw node request/response pair satisfies the runtime contract, so the
-  // casts are structural (node types, no `any`).
-  const passportInit = passport.initialize() as unknown as (
-    req: FastifyRequest['raw'],
-    res: FastifyReply['raw'],
-    done: (err?: Error) => void,
-  ) => void;
-  const passportSess = passport.session() as unknown as (
-    req: FastifyRequest['raw'],
-    res: FastifyReply['raw'],
-    done: (err?: Error) => void,
-  ) => void;
-  app.addHook('onRequest', (request: FastifyRequest, reply: FastifyReply, done: HookHandlerDoneFunction) => {
-    passportInit(request.raw, reply.raw, done);
-  });
-  app.addHook('onRequest', (request: FastifyRequest, reply: FastifyReply, done: HookHandlerDoneFunction) => {
-    // @fastify/session attaches the session to `request.session` (the Fastify
-    // request object), but passport.session() looks for it on the raw Node
-    // request (`request.raw.session`). Bridge the two so passport can read
-    // and write the session.
-    (request.raw as unknown as Record<string, unknown>).session = request.session;
-    passportSess(request.raw, reply.raw, done);
-  });
-
+  // Auth routes (docs/SPEC.md §5) — the Google/GitHub OAuth2 flow is
+  // hand-rolled in src/auth/oauth.ts (no Passport). The session holds only
+  // `userId`; routes read/write `request.session` directly.
   void app.register(authRoutes, { prefix: '/api/auth' });
   void app.register(habitRoutes, { prefix: '/api' });
 
-  // WebSocket milestone engine (docs/SPEC.md §8). The plugin must be registered
-  // before the `/ws` route; the route is mounted at the app root (not under
-  // `/api`) so the WS URL is `ws://<host>/ws` (frontend builds it from
-  // `window.location`, docs/SPEC.md §9).
-  void app.register(fastifyWebsocket);
+  // WebSocket milestone engine (docs/SPEC.md §8). `wsRoutes` attaches its own
+  // `ws` WebSocketServer to the app's HTTP server and handles the `GET /ws`
+  // upgrade directly — no `@fastify/websocket` plugin. The route is mounted at
+  // the app root (not under `/api`) so the WS URL is `ws://<host>/ws`
+  // (frontend builds it from `window.location`, docs/SPEC.md §9).
   void app.register(wsRoutes);
 
   app.get('/healthz', async (_request, reply) => {
