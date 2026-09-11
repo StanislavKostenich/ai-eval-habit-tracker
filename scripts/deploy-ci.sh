@@ -256,58 +256,19 @@ az containerapp update \
   --output none
 echo "    Backend min-replicas set to 1 (no cold-start 504s)."
 
-# --- 7. Retrieve the backend's internal FQDN ------------------------------
+# --- 7. Verify backend is ready -----------------------------------------------
+# Inside Azure Container Apps, containers in the same environment reach each other
+# using internal service discovery (app-name:port). The frontend nginx.conf uses
+# backend-app:3000, which is already correct and doesn't need updating.
 
 echo ""
-echo "==> Waiting for backend to be ready, then retrieving internal FQDN"
+echo "==> Waiting for backend to be ready"
 sleep 15
+echo "    Backend ready (internal service discovery via backend-app:3000)"
 
-BACKEND_FQDN=$(az containerapp show \
-  --name "$BACKEND_APP_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --query 'properties.configuration.ingress.fqdn' -o tsv)
-
-if [[ -z "$BACKEND_FQDN" || "$BACKEND_FQDN" == "None" ]]; then
-  echo "ERROR: Failed to retrieve backend FQDN."
-  echo "       Inspect the app: az containerapp show --name $BACKEND_APP_NAME --resource-group $AZURE_RESOURCE_GROUP"
-  echo "       Or view logs:    az containerapp logs show --name $BACKEND_APP_NAME --resource-group $AZURE_RESOURCE_GROUP --follow"
-  exit 1
-fi
-echo "    Backend FQDN: $BACKEND_FQDN"
-
-# --- 8. Rewrite frontend/nginx.conf with the real backend FQDN ------------
-# The frontend nginx proxies /api and /ws to the backend. In the Dockerfile
-# the proxy upstream is the compose service name `backend` (http://backend:3000),
-# which only resolves inside docker-compose. On ACA the backend is a separate
-# Container App reached over its internal FQDN, so we substitute it here before
-# building the frontend image.
-#
-# Portable in-place edit: write to a temp file, then move it over the original.
-# (Avoids `sed -i ''`, which is BSD-specific and breaks on GNU sed.)
-
-NGINX_CONF="$SCRIPT_DIR/frontend/nginx.conf"
-if [[ ! -f "$NGINX_CONF" ]]; then
-  echo "ERROR: $NGINX_CONF not found. Cannot proceed."
-  exit 1
-fi
-
-echo ""
-echo "==> Rewriting $NGINX_CONF with backend FQDN"
-NGINX_TMP="$NGINX_CONF.tmp.$$"
-sed "s|http://backend:3000|http://${BACKEND_FQDN}:3000|g" "$NGINX_CONF" > "$NGINX_TMP"
-mv "$NGINX_TMP" "$NGINX_CONF"
-
-if grep -q "$BACKEND_FQDN" "$NGINX_CONF"; then
-  echo "    nginx.conf now proxies to: http://$BACKEND_FQDN"
-else
-  echo "ERROR: nginx.conf rewrite failed — backend FQDN not found after sed."
-  exit 1
-fi
-
-# --- 9. Build and push the frontend image (single build) -----------------
-# This is the ONLY frontend build. It happens after the nginx.conf rewrite so
-# the image bakes in the correct backend proxy target. (The manual deploy.sh
-# builds the frontend twice; the first build there is wasted and is dropped.)
+# --- 8. Build and push the frontend image ---------------------------------
+# The frontend's nginx.conf is static (uses backend-app:3000 for internal service
+# discovery), so no rewrite is needed. Just build and push the image.
 
 FRONTEND_IMAGE="${AZURE_REGISTRY_LOGIN_SERVER}/habit-tracker-frontend:latest"
 
@@ -322,7 +283,7 @@ az acr build \
   --output none
 echo "    Frontend image built and pushed."
 
-# --- 10. Deploy (or update) the frontend Container App --------------------
+# --- 9. Deploy (or update) the frontend Container App ---------------------
 # Ingress is external: this is the public HTTPS URL.
 
 echo ""
@@ -350,7 +311,7 @@ else
   echo "    Frontend app created."
 fi
 
-# --- 11. Retrieve the frontend's public FQDN ------------------------------
+# --- 10. Retrieve the frontend's public FQDN ------------------------------
 
 echo ""
 echo "==> Waiting for frontend to be ready, then retrieving public FQDN"
@@ -368,7 +329,7 @@ if [[ -z "$FRONTEND_FQDN" || "$FRONTEND_FQDN" == "None" ]]; then
 fi
 echo "    Frontend FQDN: $FRONTEND_FQDN"
 
-# --- 12. Update the backend with the real FRONTEND_URL --------------------
+# --- 11. Update the backend with the real FRONTEND_URL --------------------
 # The backend uses FRONTEND_URL for OAuth redirect back-URLs and CORS. It was
 # set to a placeholder in step 7; correct it now that we know the real URL.
 
@@ -381,7 +342,7 @@ az containerapp update \
   --output none
 echo "    Backend FRONTEND_URL set to https://$FRONTEND_FQDN"
 
-# --- 13. Summary ------------------------------------------------------------
+# --- 12. Summary ---------------------------------------------------------------
 
 echo ""
 echo "============================================================"
@@ -389,7 +350,7 @@ echo "  DEPLOYMENT SUCCESSFUL"
 echo "============================================================"
 echo ""
 echo "  Frontend URL:   https://$FRONTEND_FQDN"
-echo "  Backend FQDN:   $BACKEND_FQDN (internal, via nginx proxy)"
+echo "  Backend:        backend-app:3000 (internal service discovery)"
 echo "  Resource Group: $AZURE_RESOURCE_GROUP"
 echo "  ACR:            $AZURE_REGISTRY_NAME"
 echo ""
