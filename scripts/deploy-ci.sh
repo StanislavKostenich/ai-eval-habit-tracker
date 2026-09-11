@@ -230,6 +230,42 @@ else
   echo "    Backend app created."
 fi
 
+# --- 6b. Ensure the backend container exposes port 3000 --------------------
+# `az containerapp create --target-port 3000` sets the container's target port
+# but does NOT add a `ports` entry, so `exposedPort` stays 0 and the internal
+# ingress FQDN forwards nothing. The frontend nginx proxies to this FQDN, so
+# without this patch every /api and /ws request gets a 404/502.
+#
+# We dump the current spec, inject the ports array, and apply it via --yaml.
+# This is idempotent: re-apply on every deploy (update path included).
+
+echo ""
+echo "==> Ensuring backend container exposes port 3000 on internal ingress"
+BACKEND_SPEC=$(az containerapp show \
+  --name "$BACKEND_APP_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --output json)
+
+BACKEND_SPEC_PATCHED=$(echo "$BACKEND_SPEC" | python3 -c "
+import sys, json
+app = json.load(sys.stdin)
+container = app['properties']['template']['containers'][0]
+ports = container.get('ports') or []
+if not any(p.get('port') == 3000 for p in ports):
+    ports.append({'protocol': 'HTTP', 'port': 3000})
+    container['ports'] = ports
+    json.dump(app, sys.stdout)
+else:
+    json.dump(app, sys.stdout)
+")
+
+echo "$BACKEND_SPEC_PATCHED" | az containerapp update \
+  --name "$BACKEND_APP_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --yaml - \
+  --output none
+echo "    Backend port 3000 exposed."
+
 # --- 7. Retrieve the backend's internal FQDN ------------------------------
 
 echo ""
@@ -268,7 +304,7 @@ fi
 echo ""
 echo "==> Rewriting $NGINX_CONF with backend FQDN"
 NGINX_TMP="$NGINX_CONF.tmp.$$"
-sed "s|http://backend:3000|http://${BACKEND_FQDN}|g" "$NGINX_CONF" > "$NGINX_TMP"
+sed "s|http://backend:3000|http://${BACKEND_FQDN}:3000|g" "$NGINX_CONF" > "$NGINX_TMP"
 mv "$NGINX_TMP" "$NGINX_CONF"
 
 if grep -q "$BACKEND_FQDN" "$NGINX_CONF"; then
