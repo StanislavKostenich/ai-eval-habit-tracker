@@ -9,7 +9,7 @@ set -euo pipefail
 #   1. Runs `az login --use-device-code` (interactive — you complete the
 #      browser flow within ~5 minutes).
 #   2. Captures the resulting access token.
-#   3. Pushes it to the AZURE_ACCESS_TOKEN GitHub secret via `gh api`.
+#   3. Pushes it to the AZURE_ACCESS_TOKEN GitHub secret via `gh secret set`.
 #
 # Run this BEFORE each deploy (the token expires in ~60 minutes):
 #
@@ -48,23 +48,13 @@ fi
 echo "    Token captured (${#TOKEN} chars)."
 
 echo "==> Pushing token to GitHub secret AZURE_ACCESS_TOKEN..."
-# Build a JSON body with the token and send it to the GitHub API. We write the
-# body to a temp file (chmod 600) so the token never appears in the process
-# list or shell history, then delete it.
-BODY_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE"' EXIT
-
-# JSON-escape the token (it's a base64url JWT, but escape defensively).
-TOKEN_JSON=${TOKEN//\\/\\\\}
-TOKEN_JSON=${TOKEN_JSON//\"/\\\"}
-printf '{"secret":"%s"}' "$TOKEN_JSON" > "$BODY_FILE"
-chmod 600 "$BODY_FILE"
-
-gh api \
-  -X PUT \
-  "repos/${REPO}/actions/secrets/AZURE_ACCESS_TOKEN" \
-  --input "$BODY_FILE" \
-  -H "Accept: application/vnd.github+json"
+# `gh secret set` reads the value from stdin (so it never appears in the
+# process list or shell history) and encrypts it locally with the repo's
+# public key before sending. This is the supported way to set an Actions
+# secret — `gh api` against the secrets endpoint cannot, because it doesn't
+# perform the encryption (it would 422 with "encrypted_value, key_id weren't
+# supplied").
+printf '%s' "$TOKEN" | gh secret set AZURE_ACCESS_TOKEN --repo "$REPO"
 
 echo ""
 echo "✅ Token refreshed and stored."
