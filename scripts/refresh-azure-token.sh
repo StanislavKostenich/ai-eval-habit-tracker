@@ -34,18 +34,34 @@ echo ""
 # waits (polls) until the user completes the browser flow or it times out.
 az login --use-device-code --tenant "$TENANT_ID" --output none
 
-echo "==> Login complete. Setting subscription..."
-az account set --subscription "$SUBSCRIPTION_ID"
-
-echo "==> Capturing access token..."
-TOKEN=$(az account get-access-token --query accessToken -o tsv)
+echo "==> Selecting subscription and minting a token scoped to it..."
+# Mint the token scoped to the target subscription. A plain
+# `az account get-access-token` (no --subscription) can return a token that
+# lacks subscription context when no subscription is currently selected, and
+# such a token fails with "Please run 'az login'" on Resource Manager calls.
+# Passing --subscription forces az to resolve and bind the token to the
+# subscription, so we never push a subscription-less token.
+TOKEN_JSON=$(az account get-access-token --subscription "$SUBSCRIPTION_ID" --output json)
+TOKEN=$(echo "$TOKEN_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])')
+EXPIRES=$(echo "$TOKEN_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["expiresOn"])')
 
 if [[ -z "$TOKEN" ]]; then
   echo "ERROR: Failed to capture access token."
   exit 1
 fi
 
-echo "    Token captured (${#TOKEN} chars)."
+# Verify the token can actually see the subscription before we commit it.
+# This catches a token minted without subscription context.
+VISIBLE=$(az rest --method GET --url "/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Resources/resourceGroups?api-version=2021-04-01" \
+  --headers "Authorization=Bearer ${TOKEN}" \
+  --query 'length(value)' -o tsv 2>/dev/null || echo "0")
+if [[ "$VISIBLE" == "0" || "$VISIBLE" == "None" ]]; then
+  echo "ERROR: Captured token cannot read the target subscription's resource groups."
+  echo "       Re-run 'az login' and try again."
+  exit 1
+fi
+
+echo "    Token captured (${#TOKEN} chars), expires $EXPIRES, subscription access verified."
 
 echo "==> Pushing token to GitHub secret AZURE_ACCESS_TOKEN..."
 # `gh secret set` reads the value from stdin (so it never appears in the

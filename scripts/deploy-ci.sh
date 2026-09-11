@@ -35,7 +35,9 @@ set -euo pipefail
 #
 # Required environment variables (all must be non-empty):
 #   AZURE_ACCESS_TOKEN           The raw Bearer token (used to build AZURE_AUTH)
-#   AZURE_SUBSCRIPTION_ID        Azure subscription ID
+#   AZURE_TENANT_ID              Azure tenant ID (bound into AZURE_AUTH so the
+#                                CLI resolves the token's subscription)
+#   AZURE_SUBSCRIPTION_ID        Azure subscription ID (bound into AZURE_AUTH)
 #   AZURE_RESOURCE_GROUP         Target resource group (created if missing)
 #   AZURE_LOCATION               Azure region (e.g. eastus)
 #   AZURE_REGISTRY_LOGIN_SERVER  ACR login server (e.g. myacr.azurecr.io)
@@ -53,6 +55,7 @@ set -euo pipefail
 
 REQUIRED_VARS=(
   AZURE_ACCESS_TOKEN
+  AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
   AZURE_RESOURCE_GROUP
   AZURE_LOCATION
@@ -121,13 +124,17 @@ echo "    Repo Root:          $SCRIPT_DIR"
 # "AzureCloud", "id": "...", "user": { "name": "...", "type": "user" },
 # "accessToken": "<token>", "isActive": true }.
 #
-# We build it from AZURE_ACCESS_TOKEN. We do not know the user's UPN or
-# clientId here (they weren't captured), so we use placeholders — the CLI
-# only needs a valid accessToken to authorize API calls; it does not validate
-# the identity fields against the token for resource-manager operations.
+# We build it from AZURE_ACCESS_TOKEN plus the real tenant and subscription IDs
+# (AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID env vars). The CLI uses the
+# account's tenantId to resolve the subscription for Resource Manager calls,
+# so binding the real values here is what makes `az group exists` and friends
+# authorize correctly. The clientId/UPN are still placeholders — the CLI does
+# not validate identity fields against the token for these operations.
 
 echo ""
 echo "==> Authenticating to Azure (pre-captured access token)"
+echo "    Tenant:       $AZURE_TENANT_ID"
+echo "    Subscription: $AZURE_SUBSCRIPTION_ID"
 
 # Sanitize the token for safe JSON embedding (it's a plain base64url JWT, so
 # no escaping needed, but guard against stray backslashes/quotes defensively).
@@ -137,9 +144,9 @@ TOKEN_ESCAPED=${TOKEN_ESCAPED//\"/\\\"}
 AZURE_AUTH='[
   {
     "clientId": "a0000000-0000-0000-0000-000000000000",
-    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "tenantId": "'"$AZURE_TENANT_ID"'",
     "environmentName": "AzureCloud",
-    "id": "a0000000-0000-0000-0000-000000000000",
+    "id": "'"$AZURE_SUBSCRIPTION_ID"'",
     "user": { "name": "ci-user@placeholder", "type": "user" },
     "isDefault": true,
     "isHome": true,
