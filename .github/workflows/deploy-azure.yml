@@ -4,17 +4,17 @@ name: Deploy to Azure Container Apps
 #   - Every push to main
 #   - Manual "Run workflow" from the Actions tab
 #
-# AUTH (Service Principal):
-#   GitHub secrets store the Azure service principal credentials used to
-#   authenticate and deploy. The service principal was created with:
-#     az ad sp create-for-rbac --name github-actions-habit-tracker --role Contributor
+# AUTH (Device-code access token):
+#   Before each deploy, run `bash scripts/refresh-azure-token.sh` locally to
+#   produce a short-lived access token via device-code login. This token is
+#   stored as the AZURE_ACCESS_TOKEN secret and used by the workflow.
 #
-#   One-time setup (see docs/AZURE_SERVICE_PRINCIPAL.md):
-#     1. Create the service principal using the command above.
-#     2. Copy clientId → AZURE_CLIENT_ID secret
-#     3. Copy clientSecret → AZURE_CLIENT_SECRET secret
-#     4. Copy tenantId → AZURE_TENANT_ID secret
-#     5. Copy subscriptionId → AZURE_SUBSCRIPTION_ID secret
+#   One-time setup (see docs/SETUP_CI_CD.md):
+#     1. Run `bash scripts/refresh-azure-token.sh` to do device-code login.
+#     2. Token is automatically stored as AZURE_ACCESS_TOKEN secret.
+#     3. Token is valid ~60 minutes. Refresh before every deploy.
+#     4. Set GOOGLE_CLIENT_*, GH_OAUTH_*, SESSION_SECRET secrets.
+#     5. Set AZURE_RESOURCE_GROUP, AZURE_LOCATION, AZURE_REGISTRY_LOGIN_SERVER variables.
 
 on:
   push:
@@ -64,19 +64,15 @@ jobs:
             az version
           fi
 
-      - name: Authenticate to Azure (via az CLI)
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Authenticate to Azure (device-code token)
         run: |
           az login --service-principal \
-            --username "$AZURE_CLIENT_ID" \
-            --password "$AZURE_CLIENT_SECRET" \
-            --tenant "$AZURE_TENANT_ID" \
+            --username "04b07795-8ddb-461a-bbee-02f541bf1219" \
+            --password "${{ secrets.AZURE_ACCESS_TOKEN }}" \
+            --tenant "1a54e107-6999-4f70-acdb-194c649c72f2" \
+            --allow-no-subscriptions \
             --output none
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account set --subscription "c3c7cf3e-d1a9-4653-b9a9-a43188215731"
           echo "✓ Authenticated to Azure"
 
       - name: Deploy to Azure Container Apps
