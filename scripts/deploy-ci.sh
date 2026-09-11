@@ -153,6 +153,7 @@ echo ""
 echo "==> Building backend image (az acr build)"
 az acr build \
   --registry "$AZURE_REGISTRY_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
   --image habit-tracker-backend:latest \
   --file backend/Dockerfile \
   "$SCRIPT_DIR" \
@@ -325,6 +326,7 @@ echo ""
 echo "==> Building frontend image (az acr build, with corrected nginx.conf)"
 az acr build \
   --registry "$AZURE_REGISTRY_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
   --image habit-tracker-frontend:latest \
   --file frontend/Dockerfile \
   "$SCRIPT_DIR" \
