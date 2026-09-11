@@ -23,21 +23,15 @@ set -euo pipefail
 #   6. No local Docker dependency — all image builds go through `az acr build`
 #      (Azure's managed build service), so no local Docker daemon is needed.
 #
-# AUTH (device-code flow — no service principal):
-#   This script does NOT authenticate on its own. It expects to already be
-#   authenticated via the AZURE_AUTH environment variable, which carries a
-#   JSON array of accounts containing a ~60-minute personal access token.
-#   That token is produced by `bash scripts/refresh-azure-token.sh` (an
-#   interactive `az login --use-device-code` flow you complete in a browser),
-#   which also stores the raw token as the AZURE_ACCESS_TOKEN GitHub secret.
-#   The GitHub Actions workflow passes AZURE_ACCESS_TOKEN to this script as an
-#   env var; this script then builds AZURE_AUTH from it (step 2 below).
+# AUTH:
+#   This script does NOT authenticate on its own. In CI, the GitHub Actions
+#   workflow authenticates via the `azure/login@v2` action (OIDC federation,
+#   no secrets, no manual token refresh). When running locally, authenticate
+#   first with `az login`.
 #
 # Required environment variables (all must be non-empty):
-#   AZURE_ACCESS_TOKEN           The raw Bearer token (used to build AZURE_AUTH)
-#   AZURE_TENANT_ID              Azure tenant ID (bound into AZURE_AUTH so the
-#                                CLI resolves the token's subscription)
-#   AZURE_SUBSCRIPTION_ID        Azure subscription ID (bound into AZURE_AUTH)
+#   AZURE_TENANT_ID              Azure tenant ID
+#   AZURE_SUBSCRIPTION_ID        Azure subscription ID
 #   AZURE_RESOURCE_GROUP         Target resource group (created if missing)
 #   AZURE_LOCATION               Azure region (e.g. eastus)
 #   AZURE_REGISTRY_LOGIN_SERVER  ACR login server (e.g. myacr.azurecr.io)
@@ -54,7 +48,6 @@ set -euo pipefail
 # --- 0. Validate required environment variables ---------------------------
 
 REQUIRED_VARS=(
-  AZURE_ACCESS_TOKEN
   AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
   AZURE_RESOURCE_GROUP
@@ -113,53 +106,10 @@ echo "    Frontend App:       $FRONTEND_APP_NAME"
 echo "    Environment:        $ENVIRONMENT_NAME"
 echo "    Repo Root:          $SCRIPT_DIR"
 
-# --- 2. Authenticate to Azure via the pre-captured access token -----------
-# We do NOT call `az login` here. Instead we export AZURE_AUTH, which makes the
-# Azure CLI use the provided token for every command (including az acr build).
-# The token was captured locally via `az login --use-device-code` and pushed to
-# the AZURE_ACCESS_TOKEN GitHub secret by scripts/refresh-azure-token.sh.
-#
-# AZURE_AUTH must be a JSON array of account objects. The minimum shape the
-# CLI needs is: { "clientId": "...", "tenantId": "...", "environmentName":
-# "AzureCloud", "id": "...", "user": { "name": "...", "type": "user" },
-# "accessToken": "<token>", "isActive": true }.
-#
-# We build it from AZURE_ACCESS_TOKEN plus the real tenant and subscription IDs
-# (AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID env vars). The CLI uses the
-# account's tenantId to resolve the subscription for Resource Manager calls,
-# so binding the real values here is what makes `az group exists` and friends
-# authorize correctly. The clientId/UPN are still placeholders — the CLI does
-# not validate identity fields against the token for these operations.
-
-echo ""
-echo "==> Authenticating to Azure (pre-captured access token)"
-echo "    Tenant:       $AZURE_TENANT_ID"
-echo "    Subscription: $AZURE_SUBSCRIPTION_ID"
-
-# Sanitize the token for safe JSON embedding (it's a plain base64url JWT, so
-# no escaping needed, but guard against stray backslashes/quotes defensively).
-TOKEN_ESCAPED=${AZURE_ACCESS_TOKEN//\\/\\\\}
-TOKEN_ESCAPED=${TOKEN_ESCAPED//\"/\\\"}
-
-AZURE_AUTH='[
-  {
-    "clientId": "a0000000-0000-0000-0000-000000000000",
-    "tenantId": "'"$AZURE_TENANT_ID"'",
-    "environmentName": "AzureCloud",
-    "id": "'"$AZURE_SUBSCRIPTION_ID"'",
-    "user": { "name": "ci-user@placeholder", "type": "user" },
-    "isDefault": true,
-    "isHome": true,
-    "accessToken": "'"$TOKEN_ESCAPED"'",
-    "isActive": true
-  }
-]'
-export AZURE_AUTH
-
-echo "    AZURE_AUTH set from AZURE_ACCESS_TOKEN (${#AZURE_ACCESS_TOKEN} chars)."
-echo "    All az commands will use this token."
-
-# --- 3. Ensure the resource group exists ----------------------------------
+# --- 2. Ensure the resource group exists ----------------------------------
+# Authentication is handled upstream: in CI by the `azure/login@v2` action
+# (OIDC federation), locally by `az login`. The Azure CLI is already
+# authenticated when this script runs.
 
 echo ""
 echo "==> Ensuring resource group '$AZURE_RESOURCE_GROUP' exists"
@@ -173,7 +123,7 @@ else
   echo "    Resource group created."
 fi
 
-# --- 4. Ensure the Azure Container Registry exists ------------------------
+# --- 3. Ensure the Azure Container Registry exists ------------------------
 
 echo ""
 echo "==> Ensuring ACR '$AZURE_REGISTRY_NAME' exists"
@@ -193,7 +143,7 @@ else
   echo "    ACR created."
 fi
 
-# --- 5. Build and push the backend image ----------------------------------
+# --- 4. Build and push the backend image ----------------------------------
 # The build context is the repository root (npm workspaces monorepo; the
 # Dockerfile expects to find package.json, package-lock.json, and
 # tsconfig.base.json at the root). `az acr build` runs the build in Azure,
@@ -209,7 +159,7 @@ az acr build \
   --output none
 echo "    Backend image built and pushed."
 
-# --- 6. Ensure the Container Apps Environment exists ----------------------
+# --- 5. Ensure the Container Apps Environment exists ----------------------
 
 echo ""
 echo "==> Ensuring Container Apps Environment '$ENVIRONMENT_NAME' exists"
@@ -228,7 +178,7 @@ else
   sleep 15
 fi
 
-# --- 7. Deploy (or update) the backend Container App ----------------------
+# --- 6. Deploy (or update) the backend Container App ----------------------
 # Ingress is internal: the frontend nginx proxies /api and /ws to it.
 # FRONTEND_URL is set to a placeholder now and corrected in step 11 once the
 # frontend's public FQDN is known (used for OAuth redirect back-URLs and CORS).
@@ -280,7 +230,7 @@ else
   echo "    Backend app created."
 fi
 
-# --- 8. Retrieve the backend's internal FQDN ------------------------------
+# --- 7. Retrieve the backend's internal FQDN ------------------------------
 
 echo ""
 echo "==> Waiting for backend to be ready, then retrieving internal FQDN"
@@ -299,7 +249,7 @@ if [[ -z "$BACKEND_FQDN" || "$BACKEND_FQDN" == "None" ]]; then
 fi
 echo "    Backend FQDN: $BACKEND_FQDN"
 
-# --- 9. Rewrite frontend/nginx.conf with the real backend FQDN ------------
+# --- 8. Rewrite frontend/nginx.conf with the real backend FQDN ------------
 # The frontend nginx proxies /api and /ws to the backend. In the Dockerfile
 # the proxy upstream is the compose service name `backend` (http://backend:3000),
 # which only resolves inside docker-compose. On ACA the backend is a separate
@@ -328,7 +278,7 @@ else
   exit 1
 fi
 
-# --- 10. Build and push the frontend image (single build) -----------------
+# --- 9. Build and push the frontend image (single build) -----------------
 # This is the ONLY frontend build. It happens after the nginx.conf rewrite so
 # the image bakes in the correct backend proxy target. (The manual deploy.sh
 # builds the frontend twice; the first build there is wasted and is dropped.)
@@ -345,7 +295,7 @@ az acr build \
   --output none
 echo "    Frontend image built and pushed."
 
-# --- 11. Deploy (or update) the frontend Container App --------------------
+# --- 10. Deploy (or update) the frontend Container App --------------------
 # Ingress is external: this is the public HTTPS URL.
 
 echo ""
@@ -373,7 +323,7 @@ else
   echo "    Frontend app created."
 fi
 
-# --- 12. Retrieve the frontend's public FQDN ------------------------------
+# --- 11. Retrieve the frontend's public FQDN ------------------------------
 
 echo ""
 echo "==> Waiting for frontend to be ready, then retrieving public FQDN"
@@ -391,7 +341,7 @@ if [[ -z "$FRONTEND_FQDN" || "$FRONTEND_FQDN" == "None" ]]; then
 fi
 echo "    Frontend FQDN: $FRONTEND_FQDN"
 
-# --- 13. Update the backend with the real FRONTEND_URL --------------------
+# --- 12. Update the backend with the real FRONTEND_URL --------------------
 # The backend uses FRONTEND_URL for OAuth redirect back-URLs and CORS. It was
 # set to a placeholder in step 7; correct it now that we know the real URL.
 
@@ -404,7 +354,7 @@ az containerapp update \
   --output none
 echo "    Backend FRONTEND_URL set to https://$FRONTEND_FQDN"
 
-# --- 14. Summary ------------------------------------------------------------
+# --- 13. Summary ------------------------------------------------------------
 
 echo ""
 echo "============================================================"
