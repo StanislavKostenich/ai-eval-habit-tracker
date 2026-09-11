@@ -50,10 +50,19 @@ jobs:
           SESSION_SECRET="${PROVIDED:-$(openssl rand -hex 32)}"
           echo "session_secret=$SESSION_SECRET" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Azure CLI
-        uses: azure/setup-azcli@v1
-        with:
-          version: latest
+      - name: Verify Azure CLI is available
+        run: |
+          # Azure CLI ships pre-installed on the ubuntu-latest runner image.
+          # The old 'curl | bash' apt install failed (no sudo); there's no
+          # official setup-azcli action either. If 'az' is somehow missing,
+          # fall back to a sudo apt install (the runner grants sudo -S).
+          if command -v az >/dev/null 2>&1; then
+            az version
+          else
+            echo "az not found — installing via apt (sudo)..."
+            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+            az version
+          fi
 
       - name: Validate Azure token
         env:
