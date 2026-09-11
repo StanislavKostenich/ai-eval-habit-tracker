@@ -57,8 +57,8 @@ push to main  (or manual "Run workflow")
 - `AZURE_ACCESS_TOKEN` (a fresh ~60-min token, refreshed via `scripts/refresh-azure-token.sh` before each deploy — device-code flow, no service principal)
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `GITHUB_CLIENT_ID`
-- `GITHUB_CLIENT_SECRET`
+- `GITHUB_OAUTH_CLIENT_ID` (GitHub forbids `GITHUB_*` secret names; the workflow maps this to the app's `GITHUB_CLIENT_ID`)
+- `GITHUB_OAUTH_CLIENT_SECRET` (mapped to the app's `GITHUB_CLIENT_SECRET`)
 - `SESSION_SECRET` (optional — auto-generated if absent, but set it to keep sessions stable across deploys)
 
 > `AZURE_SUBSCRIPTION_ID` and `AZURE_TENANT_ID` are hardcoded in the workflow and in `refresh-azure-token.sh` (non-sensitive identifiers, not secrets).

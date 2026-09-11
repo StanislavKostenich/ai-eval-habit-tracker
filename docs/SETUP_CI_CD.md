@@ -61,8 +61,8 @@ What happens:
 | `AZURE_ACCESS_TOKEN` | Set automatically by `scripts/refresh-azure-token.sh` (a fresh token before each deploy). |
 | `GOOGLE_CLIENT_ID` | From Google Cloud Console → Credentials |
 | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console → Credentials |
-| `GITHUB_CLIENT_ID` | From GitHub → Settings → Developer settings → OAuth Apps |
-| `GITHUB_CLIENT_SECRET` | From GitHub → Settings → Developer settings → OAuth Apps |
+| `GITHUB_OAUTH_CLIENT_ID` | From GitHub → Settings → Developer settings → OAuth Apps. (Stored under `GITHUB_OAUTH_*` because GitHub forbids Actions secrets named `GITHUB_*`. The workflow maps it to the app's `GITHUB_CLIENT_ID`.) |
+| `GITHUB_OAUTH_CLIENT_SECRET` | Same source as above. Mapped to the app's `GITHUB_CLIENT_SECRET`. |
 | `SESSION_SECRET` | A random 32+ character string. Generate: `openssl rand -hex 32` |
 
 > **Note on `SESSION_SECRET`:** the app boot hard-fails without a 32+ char `SESSION_SECRET` (CLAUDE.md §3). The workflow auto-generates one if you don't set this secret, but setting it explicitly keeps sessions stable across redeploys (otherwise each deploy rotates the secret and invalidates logged-in sessions).
