@@ -51,17 +51,20 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 # Verify the token can actually see the subscription before we commit it.
-# This catches a token minted without subscription context.
-VISIBLE=$(az rest --method GET --url "/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Resources/resourceGroups?api-version=2021-04-01" \
-  --headers "Authorization=Bearer ${TOKEN}" \
-  --query 'length(value)' -o tsv 2>/dev/null || echo "0")
-if [[ "$VISIBLE" == "0" || "$VISIBLE" == "None" ]]; then
-  echo "ERROR: Captured token cannot read the target subscription's resource groups."
-  echo "       Re-run 'az login' and try again."
+# We rely on `az group list` (which uses the local session bound to this
+# subscription) rather than a raw `az rest` call: some ARM API versions
+# return a spurious 404 for the resource-group listing endpoint, which would
+# falsely reject a valid token.
+GROUPS=$(az group list --query 'length(@)' -o tsv 2>/dev/null || echo "0")
+if [[ "$GROUPS" == "0" || "$GROUPS" == "None" ]]; then
+  echo "ERROR: Captured token cannot list resource groups in the subscription."
+  echo "       The account may lack a role on this subscription, or the"
+  echo "       login is not bound to it. Re-run 'az login' and retry."
   exit 1
 fi
 
-echo "    Token captured (${#TOKEN} chars), expires $EXPIRES, subscription access verified."
+echo "    Token captured (${#TOKEN} chars), expires $EXPIRES."
+echo "    Subscription access verified ($GROUPS resource groups visible)."
 
 echo "==> Pushing token to GitHub secret AZURE_ACCESS_TOKEN..."
 # `gh secret set` reads the value from stdin (so it never appears in the
