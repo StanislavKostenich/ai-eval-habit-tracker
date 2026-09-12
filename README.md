@@ -8,6 +8,8 @@
 
 Full-stack MVP habit tracking app with daily check-ins, streak calculation, single sign-on (SSO) authentication, and real-time WebSocket milestone notifications. Built with Node.js, React, and SQLite.
 
+**🌐 Live demo (dev environment):** [habit-tracker-app.salmonrock-7165d699.eastus.azurecontainerapps.io](https://habit-tracker-app.salmonrock-7165d699.eastus.azurecontainerapps.io/) — deployed via Azure Container Apps (see [Deploy to Azure](#-deploy-to-azure-github-actions) below). This instance runs with `NODE_ENV=development`, so Demo Login is intentionally reachable there — do not point a real production deployment at these settings.
+
 **Quick Links:** [☁️ Deploy to Azure](#-deploy-to-azure-github-actions) • [📦 Docker Setup](#-docker-deployment) • [🚀 Quick Start](#-quick-start) • [📚 API Docs](#api-overview) • [🔧 Setup Guide](#environment-setup) • [📖 Full Docs](./DOCKER.md)
 
 ---
@@ -737,6 +739,9 @@ npm run dev
 - **[API Overview](#api-overview)** — REST API endpoint reference (in this README)
 - **[Database Schema](#database-schema)** — Four-table schema with CASCADE semantics (in this README)
 - **[Streak Calculation & Timezone](#streak-calculation--timezone-handling)** — UTC "today" rules and examples (in this README)
+
+### Model Evaluation Reports
+- **[docs/QWEN_AUDIT_REPORT.md](./docs/QWEN_AUDIT_REPORT.md)** — Standalone spec-compliance, test, and code-quality audit of this repo's build (qwen3.8-27b-fp8), including live Azure deployment verification
 
 ---
 
