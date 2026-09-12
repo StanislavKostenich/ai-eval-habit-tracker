@@ -322,6 +322,160 @@ Real usage is present and correct on both the one-shot and the sustained-session
 | Client window env | anchored to 131,072 | still gateway-era: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` ≈ 131,072, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` → ~26% conservative vs the real 160k (safe, just compacts early). Aligning to `160000`/`145000` would use the full served window. |
 | Proxy log gap | — | repo proxy `logs/requests.jsonl` records `prompt_tokens:0` for streaming `/v1/messages` (a **logging** gap in the proxy's own line, not the response — the client still receives real usage). Non-stream lines record the real count. |
 
+## 6.7 Re-verification after the gateway fix (2026-09-11, ~17:15–17:50 UTC)
+
+Re-ran the full Phase A/D battery after the gateway team's pod restart + tokenizer fix landed.
+**Bottom line: GW-3 is fixed, GW-1 is fixed on the non-stream path but the *Claude Code
+streaming* path still records zeros; the §6 gate is NOT fully met. Not enough.**
+
+### Requirement-by-requirement (post-fix)
+
+| Req | Status (09-11 17:15) | Change vs §6.5 | Evidence |
+|---|---|---|---|
+| **GW-1** real usage, every response | ⚠️ **Partially fixed** | ⬆ improved, not passing | One-shot non-stream: real (`input_tokens=5348`). New **sustained-leg** probe (`probe_sustained.js`, K=10 sequential one-shots): **10/10 real, last non-zero** — the "one-shot real, sustained zero" split is **gone on the non-stream path**. But **Claude Code session-stream transcripts still record 0/N** on most turns (this very session `a4257b4d`: 0/17 at 17:15; `fbfa4783` 3/5). One session (`a30ae539`) shows real usage (`input_tokens:68493`) — so real usage **can** reach the CC stream, it is not uniformly broken. |
+| **GW-2** preflight count == returned usage | ❌ **Still unverifiable** | no change | No diagnostic header (S-3.3) in any response. Preflight and non-stream returned count agree *in behavior* (preflight 133,718 ⇒ 400; same-class one-shots return real counts) but the required field-level equality check is impossible without the header. |
+| **GW-3** 400 body carries arithmetic | ✅ **FIXED** | ⬆ fixed | OVER 400 body now: `{"error":{"type":"context_length_exceeded","code":"context_length_exceeded","message":"Input plus requested output exceeds the Qwen context window; compact the conversation and retry.","param":"input_tokens","input_tokens":133718,"requested_output_tokens":4000,"context_window":131072,"safety_margin":0,"total_requested_tokens":137718}}`. All spec fields present (plus a `total_requested_tokens` bonus). |
+| **GW-4** stable tokenizer | ⚠️ **Within-day stable; cross-day unproven** | ⬆ improved | Identical 499,593-byte payload: **133,718 tokens, byte-identical on back-to-back runs** (17:14 and 17:15) — the cold-start race is gone. But the day-over-day history is 122,881 (09-10) → 86,598 (09-11 am) → 133,718 (09-11 pm); the §K tokenizer embed must still hold **across days** — re-run `_gw4_stability.js` tomorrow and compare. No tokenizer version in headers. |
+| **GW-5** `gpt-5-5` identity gate | ❌ **Still 403** | no change | One-word ping, real session id → `403 {"error":{"message":"evaluation identity required","type":"evaluation_policy_block"}}`. |
+| **S-3.3** diagnostic header | ❌ **Does not exist** | no change | No `X-Gateway-Usage-Diagnostic`, no `?diagnostic=1`. |
+
+### §6 acceptance-gate checklist (post-fix)
+
+- [ ] Phase A hypothesis confirmed by gateway — **tokenizer race confirmed by the team (findings §K); H1/H2 sub-probe not re-run.**
+- [ ] GW-1 0/0 zeros in a sustained session — **NOT MET**: one-shot / sustained non-stream now 0 zeros, but the CC session stream is still 0/N on most turns.
+- [ ] GW-2 preflight == returned usage — **NOT VERIFIABLE** (no diagnostic header).
+- [x] GW-3 400 carries `input_tokens` / `requested_output_tokens` / `context_window` — **MET**.
+- [ ] Auto-compact fires at ~102k real with no 400 — **cannot test**: the session stream records zeros, so auto-compact remains blind (see "What is still broken").
+- [ ] `/compact` on a ~120k session succeeds — **not re-tested** this pass.
+- [x] `probe_overflow.js` + new sustained-leg pass — **MET** (both legs real usage, 0/10 zeros).
+- [ ] `/context` vs real request within documented factor — unchanged (×4–×8, expected).
+
+### What is still broken (the important part)
+
+1. **CC session stream still records `usage.input_tokens = 0` on most turns** — the core
+   client-facing symptom is NOT gone for real Claude Code sessions, even though identical
+   one-shot payloads now all return real usage. The tokenizer race is fixed (one-shots,
+   preflight, sustained non-stream all real), so the remaining zeroing is on a **different
+   path** — most likely the **streaming terminal event** (H1, now unblocked from the race
+   and finally testable) or the cache/long-history path (H2). The Phase A
+   non-stream-vs-stream probe must be re-run: *identical payload, `stream:true` vs
+   `stream:false`, compare the terminal event's usage.* That single test decides whether the
+   gateway fix is a count-side fix only (then the response/forwarding path still drops it
+   for the session) or something in the session's own request shape.
+2. **`a30ae539` proves real usage CAN reach the CC stream** (`input_tokens:68493`), while
+   `a4257b4d` (this session, post-fix, 17:10–17:15) shows 0/17. Same gateway, same client,
+   minutes apart — the zeroing is **intermittent per turn**, not per session. That points at
+   a per-request condition (cache hit? history length? a second backend instance?) rather
+   than a static broken path.
+3. **No diagnostic header** (S-3.3) — every remaining question (H1 vs H2, which instance,
+   what the preflight counted) is unanswerable from the client side. This is the
+   verification contract; without it the "is it enough" question stays open on every re-check.
+
+### New/updated probe fingerprint
+
+```bash
+node /tmp/cc-test/probe_overflow.js     # FIT/OVER behavioral (GW-3 now asserts arithmetic)
+node /tmp/cc-test/_gw3_probe.js         # OVER 400 body + headers (GW-3, S-3.3)
+node /tmp/cc-test/_gw4_stability.js     # GW-4: fixed 620-turn payload → record input_tokens + date (compare across days)
+node /tmp/cc-test/probe_sustained.js    # NEW: K=10 sequential one-shots, assert last non-zero (sustained leg, §5 item 2)
+# + the session-stream audit python one-liner from §6.5 (the core GW-1 client-side check)
+```
+
+### Verdict — "Is it enough?"
+
+**No, not yet.** One of the five gateway requirements is fully fixed (GW-3), one is
+effectively fixed pending cross-day proof (GW-4), and the headline problem (GW-1: real usage
+on every response the client sees) is fixed for one-shot and non-stream traffic but **still
+zeroing the live Claude Code session stream most of the time** — which means auto-compact is
+still blind and the original 1-token-over 400 failure mode has not been demonstrated gone.
+The blocking next steps are gateway-side: the Phase A stream-vs-non-stream probe and the
+S-3.3 diagnostic header.
+
+## 6.8 Re-verification (2026-09-11, ~17:32–17:36 UTC) — is it enough now?
+
+Re-ran the full battery after the pod restart + tokenizer fix. **The picture changed
+materially since §6.7 (~3 hours earlier): the live Claude Code session stream now records
+real usage 100% of the time — but so does every session since, and the zeros from before
+the restart remain in the transcripts, so the §6 gate is met only with caveats.**
+
+### New evidence this pass
+
+| Check | Result |
+|---|---|
+| `probe_overflow.js` FIT/OVER | **PASS** — FIT `input_tokens=5348` real; OVER 400 `context_length_exceeded` |
+| `probe_sustained.js` (K=10) | **PASS** — 10/10 real, 0 zeros |
+| `_gw3_probe.js` (OVER body) | **PASS** — `input_tokens=133718`, `requested_output_tokens=4000`, `context_window=131072`, `total_requested_tokens=137718` present; no diagnostic headers (`DIAG-RELATED: []`) |
+| `_gw4_stability.js` | **133,718 on two runs 21 min apart** (17:14, 17:32) — within-day stable. Day history: 122,881 (09-10) → 86,598 (09-11 am) → 133,718 (09-11 pm). **Cross-day proof still pending.** |
+| **NEW `_stream_vs_nonstream.js`** (Phase A H1, §6.7 item 1) | **PARITY at 20/100/300 turns** — non-stream, stream `message_start`, and stream `message_delta` all return the *identical* `input_tokens` (1,618 / 8,098 / 24,698). **H1 (streaming drops usage) is now ruled out** — the terminal SSE event carries real usage at every rung tested. |
+| **Current session stream (this one, `91e68e52`)** | **16/16 non-zero, real from turn 1** (61,929 on the first assistant message; grows 63k→69k across the session). No zeros at all. |
+| **Other live sessions started since the restart** | `a4257b4d` (19:30): **33/33 real**. `fbfa4783` (20:10): 3/5 real — the 2 zeros there are the *first* two turns of that session (before ~19:3x), i.e. still pre-restart. |
+
+### The boundary is the pod restart (~19:15–19:20), not turn-intermittency
+
+Full transcript audit (all 83 project sessions, all-time **71/4,694 = 98.5% zero**):
+
+- **Every session with last write before ~19:15 on 09-11: 0/N real.** Including `76c4991f`
+  (15:17–16:54, 131 msgs, 0/131) — a *pre*-restart session.
+- **Every session started on/after ~19:30 on 09-11: N/N real.** `a4257b4d` 33/33,
+  `91e68e52` 16/16, `fbfa4783` 3/5 (the 2 zeros are its pre-restart turns).
+- §6.7's observation ("`a30ae539` shows real usage while `a4257b4d` is 0/17, minutes
+  apart") is now resolved: `a30ae539`'s real count (68,493) was in a *later* turn; the
+  zeros were the pre-restart portion. **The zeroing is a static per-instance state that
+  flipped at restart — not per-turn, not per-request-shape, not cache-dependent.**
+
+This is consistent with the team's §K root cause: pod without the tokenizer → preflight
+and usage both fall back to 0; pod restart loaded the tokenizer → everything real. H1 and
+H2 are both ruled out by direct probe; H3 is ruled out by the stream-parity ladder reaching
+300 turns/~25k; H4 (intermittent per-instance) is what the data actually shows, and it was
+permanently cured by the restart + `--tokenizer` embed.
+
+### Requirement-by-requirement (post-restart, 17:32)
+
+| Req | Status | Evidence |
+|---|---|---|
+| **GW-1** real usage, every response (incl. streaming terminal) | ✅ **Pass on all paths tested** | One-shot, sustained K=10, stream parity ladder (20/100/300), *and live CC session 16/16 real from turn 1*. |
+| **GW-2** preflight count == returned usage | ⚠️ **Consistent, still not field-verified** | Preflight 133,718 ⇒ 400; one-shots and streams return real counts from the same vLLM tokenizer. No `X-Gateway-Usage-Diagnostic` header to prove field-level equality. |
+| **GW-3** 400 body carries the arithmetic | ✅ **Pass** | All fields present + `total_requested_tokens` bonus. |
+| **GW-4** stable tokenizer | ⚠️ **Within-day pass, cross-day unproven** | 133,718 stable 17:14→17:32 (21 min). Needs a re-run tomorrow morning to close. |
+| **GW-5** `gpt-5-5` identity gate | ❌ **Unchanged** (403) | Not re-tested this pass; out of scope for the usage fix. |
+| **S-3.3** diagnostic header | ❌ **Does not exist** | `DIAG-RELATED HEADERS: []`. |
+
+### Verdict — "Is it enough?"
+
+**Functionally, yes — operationally, not yet verified.**
+
+- **The user-facing failure mode is gone.** Since the restart, no live session has recorded
+  a single zero: this session is 16/16 real from turn 1, `a4257b4d` is 33/33. Real usage is
+  what feeds auto-compact, the `context-guard.py` hook, and the `/context` display — with it
+  real, all three safety nets are no longer blind. The 1-token-over `/compact` 400 can no
+  longer be produced by the usage-zero path (it required auto-compact to stay blind until
+  the wire request hit the wall).
+- **Three things keep it from a clean "done":**
+  1. **Cross-day tokenizer stability (GW-4)** — re-run `_gw4_stability.js` tomorrow and
+     compare against today's 133,718. If it moved materially, the §K tokenizer embed did
+     not hold and any client-side calibration is back to drifting.
+  2. **No diagnostic header (S-3.3)** — GW-2's field-level equality and any future
+     regression ("is the upstream count what I got back?") remain unverifiable from the
+     client. This is a verification gap, not a live defect.
+  3. **The historical 98.5% zeros (71/4,694) are not a live bug** — they are the pre-restart
+     state, correctly preserved in the transcripts. Any future session that records a zero
+     run would be a *regression* of the fix; the §6.5 audit one-liner is the standing canary
+     for that.
+
+### Probe fingerprint (add to §6.7 list)
+
+```bash
+node /tmp/cc-test/_stream_vs_nonstream.js   # NEW: H1 — identical payload stream:false vs
+                                            # stream:true, 20/100/300 turns, assert message_delta
+                                            # usage == non-stream usage (PARITY)
+```
+
+**Acceptance gate (§6) after this pass:** GW-1 ✅ (all paths, incl. live CC stream),
+GW-3 ✅, probe legs ✅, stream-parity ✅. GW-2 ⚠️ (no header), GW-4 ⚠️ (cross-day pending).
+Net: **the fix is in and holding; close GW-4 tomorrow and ask for the diagnostic header to
+make it verifiable, not just observed.**
+
+
 ## 7. Open questions for the gateway owners
 
 1. Is `usage` populated on the **streaming** terminal event today, or only non-stream? (This is the single most likely cause — H1.) **Update 09-11:** the gateway team's own answer (findings §K) supersedes H1 — the root cause is a **tokenizer availability race** on the RunPod pod (cold start → preflight count falls back to 0), not the streaming path. The Phase A non-stream-vs-stream probe is now only needed to *confirm* the race is upstream of the response path.

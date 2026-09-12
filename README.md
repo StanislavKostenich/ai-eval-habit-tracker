@@ -741,6 +741,7 @@ npm run dev
 - **[Streak Calculation & Timezone](#streak-calculation--timezone-handling)** — UTC "today" rules and examples (in this README)
 
 ### Model Evaluation Reports
+- **[docs/EXECUTIVE_SUMMARY.md](./docs/EXECUTIVE_SUMMARY.md)** — Research summary: is self-hosted Qwen3.8-27B-FP8 good enough for daily development? (C-level-readable)
 - **[docs/QWEN_AUDIT_REPORT.md](./docs/QWEN_AUDIT_REPORT.md)** — Standalone spec-compliance, test, and code-quality audit of this repo's build (qwen3.8-27b-fp8), including live Azure deployment verification
 
 ---
