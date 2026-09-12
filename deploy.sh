@@ -18,8 +18,9 @@ GOOGLE_CLIENT_SECRET=""
 GITHUB_CLIENT_ID=""
 GITHUB_CLIENT_SECRET=""
 SESSION_SECRET=""
-BACKEND_APP_NAME="backend-app"
-FRONTEND_APP_NAME="frontend-app"
+APP_NAME="habit-tracker-app"
+LEGACY_BACKEND_APP="backend-app"
+LEGACY_FRONTEND_APP="frontend-app"
 ENVIRONMENT_NAME="habit-tracker-env"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -181,8 +182,7 @@ echo -e "\n${BLUE}Deployment Configuration:${NC}"
 echo "  Resource Group:    $RESOURCE_GROUP"
 echo "  Location:          $LOCATION"
 echo "  Registry:          $REGISTRY_NAME"
-echo "  Backend App:       $BACKEND_APP_NAME"
-echo "  Frontend App:      $FRONTEND_APP_NAME"
+echo "  Container App:     $APP_NAME (backend + frontend)"
 echo "  Environment:       $ENVIRONMENT_NAME"
 
 # Confirm before proceeding
@@ -235,16 +235,19 @@ az acr build \
     --output none
 print_success "Backend image pushed"
 
-# Frontend image (first iteration, will rebuild later with correct BACKEND_FQDN)
-echo "Building frontend image (v1)..."
+echo "Building frontend image (nginx.azure.conf for localhost upstream)..."
 az acr build \
     --registry "$REGISTRY_NAME" \
     --resource-group "$RESOURCE_GROUP" \
     --image habit-tracker-frontend:latest \
     --file frontend/Dockerfile \
+    --build-arg NGINX_CONF=nginx.azure.conf \
     "$SCRIPT_DIR" \
     --output none
 print_success "Frontend image pushed"
+
+BACKEND_IMAGE="${REGISTRY_NAME}.azurecr.io/habit-tracker-backend:latest"
+FRONTEND_IMAGE="${REGISTRY_NAME}.azurecr.io/habit-tracker-frontend:latest"
 
 # Step 4: Create Container Apps Environment
 print_header "Step 4: Creating Container Apps Environment"
@@ -259,155 +262,104 @@ else
     print_success "Environment created"
 fi
 
-# Step 5: Deploy backend Container App
-print_header "Step 5: Deploying backend Container App"
+# Step 5: Deploy unified Container App (backend + frontend)
+print_header "Step 5: Deploying unified Container App"
 
-if az containerapp show --name "$BACKEND_APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
-    print_warning "Backend app already exists, updating..."
+CONTAINERAPP_YAML="$(mktemp)"
+trap 'rm -f "$CONTAINERAPP_YAML"' EXIT
+
+sed \
+    -e "s|__BACKEND_IMAGE__|${BACKEND_IMAGE}|g" \
+    -e "s|__FRONTEND_IMAGE__|${FRONTEND_IMAGE}|g" \
+    "$SCRIPT_DIR/scripts/containerapp.yaml.tpl" > "$CONTAINERAPP_YAML"
+
+if az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+    print_warning "Container app already exists, updating..."
     az containerapp update \
-        --name "$BACKEND_APP_NAME" \
+        --name "$APP_NAME" \
         --resource-group "$RESOURCE_GROUP" \
-        --image "${REGISTRY_NAME}.azurecr.io/habit-tracker-backend:latest" \
-        --set-env-vars \
-            NODE_ENV=production \
-            PORT=3000 \
-            DATABASE_PATH=/data/habits.db \
-            SESSION_SECRET="$SESSION_SECRET" \
-            GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-            GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-            GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
-            GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
-            FRONTEND_URL=https://placeholder.azurecontainerapps.io \
+        --yaml "$CONTAINERAPP_YAML" \
         --output none
-    print_success "Backend app updated"
+    print_success "Container app updated"
 else
     az containerapp create \
-        --name "$BACKEND_APP_NAME" \
+        --name "$APP_NAME" \
         --resource-group "$RESOURCE_GROUP" \
         --environment "$ENVIRONMENT_NAME" \
-        --image "${REGISTRY_NAME}.azurecr.io/habit-tracker-backend:latest" \
-        --target-port 3000 \
-        --ingress internal \
-        --registry-server "${REGISTRY_NAME}.azurecr.io" \
-        --env-vars \
-            NODE_ENV=production \
-            PORT=3000 \
-            DATABASE_PATH=/data/habits.db \
-            SESSION_SECRET="$SESSION_SECRET" \
-            GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-            GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-            GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
-            GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
-            FRONTEND_URL=https://placeholder.azurecontainerapps.io \
-        --output none
-    print_success "Backend app created"
-fi
-
-# Step 6: Get backend's internal FQDN
-print_header "Step 6: Retrieving backend internal FQDN"
-echo "Waiting for backend app to be ready..."
-sleep 10
-
-BACKEND_FQDN=$(az containerapp show \
-    --name "$BACKEND_APP_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'properties.configuration.ingress.fqdn' -o tsv)
-
-if [[ -z "$BACKEND_FQDN" ]]; then
-    print_error "Failed to retrieve backend FQDN. Check the backend app status with: az containerapp logs show --name $BACKEND_APP_NAME --resource-group $RESOURCE_GROUP"
-fi
-
-print_success "Backend FQDN: $BACKEND_FQDN"
-
-# Step 7: Update frontend/nginx.conf
-print_header "Step 7: Updating frontend/nginx.conf with backend FQDN"
-
-NGINX_CONF="$SCRIPT_DIR/frontend/nginx.conf"
-if [[ ! -f "$NGINX_CONF" ]]; then
-    print_error "nginx.conf not found at $NGINX_CONF"
-fi
-
-# Backup original
-cp "$NGINX_CONF" "${NGINX_CONF}.backup"
-print_success "Backed up original nginx.conf"
-
-# Replace http://backend:3000 with backend FQDN (handle both http:// and potential https://)
-sed -i '' "s|http://backend:3000|http://$BACKEND_FQDN|g" "$NGINX_CONF"
-
-# Verify the replacement
-if grep -q "$BACKEND_FQDN" "$NGINX_CONF"; then
-    print_success "nginx.conf updated with backend FQDN"
-else
-    print_error "Failed to update nginx.conf. Restored backup."
-    mv "${NGINX_CONF}.backup" "$NGINX_CONF"
-fi
-
-# Step 8: Rebuild and push frontend image
-print_header "Step 8: Rebuilding frontend image with updated nginx.conf"
-echo "Building frontend image (v2 with correct backend proxy)..."
-az acr build \
-    --registry "$REGISTRY_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --image habit-tracker-frontend:latest \
-    --file frontend/Dockerfile \
-    "$SCRIPT_DIR" \
-    --output none
-print_success "Frontend image rebuilt and pushed"
-
-# Step 9: Deploy frontend Container App
-print_header "Step 9: Deploying frontend Container App"
-
-if az containerapp show --name "$FRONTEND_APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
-    print_warning "Frontend app already exists, updating..."
-    az containerapp update \
-        --name "$FRONTEND_APP_NAME" \
-        --resource-group "$RESOURCE_GROUP" \
-        --image "${REGISTRY_NAME}.azurecr.io/habit-tracker-frontend:latest" \
-        --output none
-    print_success "Frontend app updated"
-else
-    az containerapp create \
-        --name "$FRONTEND_APP_NAME" \
-        --resource-group "$RESOURCE_GROUP" \
-        --environment "$ENVIRONMENT_NAME" \
-        --image "${REGISTRY_NAME}.azurecr.io/habit-tracker-frontend:latest" \
+        --image "$FRONTEND_IMAGE" \
         --target-port 80 \
         --ingress external \
         --registry-server "${REGISTRY_NAME}.azurecr.io" \
+        --min-replicas 1 \
         --output none
-    print_success "Frontend app created"
+    print_success "Container app created (frontend-only bootstrap)"
+    az containerapp update \
+        --name "$APP_NAME" \
+        --resource-group "$RESOURCE_GROUP" \
+        --yaml "$CONTAINERAPP_YAML" \
+        --output none
+    print_success "Multi-container template applied"
 fi
 
-# Step 10: Get frontend's public FQDN
-print_header "Step 10: Retrieving frontend public FQDN"
-echo "Waiting for frontend app to be ready..."
+print_header "Step 6: Configuring backend environment"
+az containerapp update \
+    --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --container-name backend \
+    --min-replicas 1 \
+    --set-env-vars \
+        NODE_ENV=production \
+        PORT=3000 \
+        DATABASE_PATH=/data/habits.db \
+        SESSION_SECRET="$SESSION_SECRET" \
+        GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
+        GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
+        GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+        GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
+        FRONTEND_URL="https://placeholder.azurecontainerapps.io" \
+        BACKEND_URL="https://placeholder.azurecontainerapps.io" \
+    --output none
+print_success "Backend env vars configured"
+
+print_header "Step 7: Retrieving public FQDN"
+echo "Waiting for app to be ready..."
 sleep 10
 
-FRONTEND_FQDN=$(az containerapp show \
-    --name "$FRONTEND_APP_NAME" \
+APP_FQDN=$(az containerapp show \
+    --name "$APP_NAME" \
     --resource-group "$RESOURCE_GROUP" \
     --query 'properties.configuration.ingress.fqdn' -o tsv)
 
-if [[ -z "$FRONTEND_FQDN" ]]; then
-    print_error "Failed to retrieve frontend FQDN. Check status with: az containerapp logs show --name $FRONTEND_APP_NAME --resource-group $RESOURCE_GROUP"
+if [[ -z "$APP_FQDN" ]]; then
+    print_error "Failed to retrieve app FQDN. Check status with: az containerapp logs show --name $APP_NAME --resource-group $RESOURCE_GROUP"
 fi
 
-print_success "Frontend FQDN: $FRONTEND_FQDN"
+print_success "App FQDN: $APP_FQDN"
 
-# Step 11: Update backend with correct FRONTEND_URL
-print_header "Step 11: Updating backend with correct FRONTEND_URL"
+print_header "Step 8: Updating OAuth redirect URLs"
 az containerapp update \
-    --name "$BACKEND_APP_NAME" \
+    --name "$APP_NAME" \
     --resource-group "$RESOURCE_GROUP" \
-    --set-env-vars FRONTEND_URL="https://$FRONTEND_FQDN" \
+    --container-name backend \
+    --set-env-vars \
+        FRONTEND_URL="https://$APP_FQDN" \
+        BACKEND_URL="https://$APP_FQDN" \
     --output none
-print_success "Backend updated with FRONTEND_URL"
+print_success "OAuth URLs updated"
+
+print_header "Step 9: Cleaning up legacy separate Container Apps"
+for legacy in "$LEGACY_BACKEND_APP" "$LEGACY_FRONTEND_APP"; do
+    if az containerapp show --name "$legacy" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+        az containerapp delete --name "$legacy" --resource-group "$RESOURCE_GROUP" --yes --output none
+        print_success "Deleted legacy app: $legacy"
+    fi
+done
 
 # Success
 print_header "🎉 Deployment Complete!"
 
-echo -e "${GREEN}Frontend URL:${NC} https://$FRONTEND_FQDN"
-echo -e "${GREEN}Backend FQDN:${NC} $BACKEND_FQDN (internal)"
+echo -e "${GREEN}App URL:${NC} https://$APP_FQDN"
+echo -e "${GREEN}Architecture:${NC} single Container App (nginx + backend via localhost)"
 echo -e "${GREEN}Resource Group:${NC} $RESOURCE_GROUP"
 echo -e "${GREEN}Registry:${NC} $REGISTRY_NAME"
 
@@ -420,22 +372,22 @@ ${YELLOW}⚠  Next Steps:${NC}
    Google Cloud Console (https://console.cloud.google.com):
    - APIs & Services → Credentials → Your OAuth 2.0 Client ID
    - Add to "Authorized redirect URIs":
-     https://$FRONTEND_FQDN/api/auth/google/callback
+     https://$APP_FQDN/api/auth/google/callback
 
    GitHub (https://github.com/settings/developers):
    - OAuth Apps → Your app
    - Update "Authorization callback URL":
-     https://$FRONTEND_FQDN/api/auth/github/callback
+     https://$APP_FQDN/api/auth/github/callback
 
 2. Test the deployment:
-   - Open: https://$FRONTEND_FQDN
+   - Open: https://$APP_FQDN
    - Click "Continue with Google" or "Continue with GitHub"
    - Create a habit and check in
    - Verify WebSocket connects (DevTools → Network → WS filter)
 
 3. Check logs if needed:
-   Backend: az containerapp logs show --name $BACKEND_APP_NAME --resource-group $RESOURCE_GROUP --follow
-   Frontend: az containerapp logs show --name $FRONTEND_APP_NAME --resource-group $RESOURCE_GROUP --follow
+   Backend: az containerapp logs show --name $APP_NAME --resource-group $RESOURCE_GROUP --container backend --follow
+   Frontend: az containerapp logs show --name $APP_NAME --resource-group $RESOURCE_GROUP --container frontend --follow
 
 4. Clean up when done:
    az group delete --name $RESOURCE_GROUP --yes

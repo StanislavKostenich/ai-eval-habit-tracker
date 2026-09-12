@@ -18,7 +18,7 @@ This guide takes you from a fresh clone to a live habit-tracker deployment on Az
 - An Azure subscription with active credits, and an account that can sign in to it.
 - **Azure CLI installed locally** (`az --version`) — needed to run the device-code login that produces the token.
 - **`gh` CLI authenticated** (`gh auth status`) — needed to push the token to the GitHub secret.
-- Google and GitHub OAuth apps already created (see `README.md` → OAuth Setup for how to create them).
+- Google and GitHub OAuth apps already created — see **[docs/OAUTH_SETUP.md](./OAUTH_SETUP.md)** (Google credentials are in **Cloud Console**, not myaccount.google.com).
 
 ---
 
@@ -59,10 +59,10 @@ What happens:
 | Secret name | Value |
 |---|---|
 | `AZURE_ACCESS_TOKEN` | Set automatically by `scripts/refresh-azure-token.sh` (a fresh token before each deploy). |
-| `GOOGLE_CLIENT_ID` | From Google Cloud Console → Credentials |
-| `GOOGLE_CLIENT_SECRET` | From Google Cloud Console → Credentials |
-| `GH_OAUTH_CLIENT_ID` | From GitHub → Settings → Developer settings → OAuth Apps. (Stored under `GH_OAUTH_*` because GitHub forbids Actions secrets named `GITHUB_*`. The workflow maps it to the app's `GITHUB_CLIENT_ID`.) |
-| `GH_OAUTH_CLIENT_SECRET` | Same source as above. Mapped to the app's `GITHUB_CLIENT_SECRET`. |
+| `GOOGLE_CLIENT_ID` | [Google Cloud Console](https://console.cloud.google.com) → Credentials. Must end in `.apps.googleusercontent.com`. |
+| `GOOGLE_CLIENT_SECRET` | Same. **Do not** put the GitHub client ID here. |
+| `GH_OAUTH_CLIENT_ID` | GitHub → Developer settings → OAuth Apps (usually `Ov23…`). Stored as `GH_OAUTH_*` because GitHub forbids Actions secrets named `GITHUB_*`. |
+| `GH_OAUTH_CLIENT_SECRET` | Same. Mapped to the app's `GITHUB_CLIENT_SECRET` at deploy time. |
 | `SESSION_SECRET` | A random 32+ character string. Generate: `openssl rand -hex 32` |
 
 > **Note on `SESSION_SECRET`:** the app boot hard-fails without a 32+ char `SESSION_SECRET` (CLAUDE.md §3). The workflow auto-generates one if you don't set this secret, but setting it explicitly keeps sessions stable across redeploys (otherwise each deploy rotates the secret and invalidates logged-in sessions).
@@ -98,7 +98,7 @@ If any are missing, add them now.
 3. Left sidebar → **Deploy to Azure Container Apps**.
 4. Click **Run workflow** (top-right) → select `main` → **Run workflow**.
 5. Optionally enter a `session_secret` (leave blank to auto-generate).
-6. Watch the run live. First deploy takes **~5–10 minutes** (it creates the ACR, the Container Apps Environment, builds two multi-stage images, and provisions two Container Apps). Start it soon after refreshing so the token doesn't expire mid-run.
+6. Watch the run live. First deploy takes **~5–10 minutes** (ACR, Container Apps Environment, two image builds, one multi-container Container App). Start it soon after refreshing so the token doesn't expire mid-run.
 
 ### Option B — Push to `main`
 
@@ -124,16 +124,18 @@ After the run completes:
    ```bash
    az login
    az containerapp show \
-     --name frontend-app \
+     --name habit-tracker-app \
      --resource-group <AZURE_RESOURCE_GROUP> \
      --query 'properties.configuration.ingress.fqdn' -o tsv
    ```
 
-   Your app is at `https://<FQDN>`.
+   Your app is at `https://<FQDN>`. The deploy log also prints `FRONTEND_URL=https://<FQDN>`.
 
 ## Step 8 — Register OAuth redirect URIs
 
-The deploy worked, but OAuth login won't until you register the frontend URL as a redirect URI with both providers.
+OAuth login will not work until redirect URIs are registered with both providers **and** GitHub secrets use the correct client IDs. See **[docs/OAUTH_SETUP.md](./OAUTH_SETUP.md)** for the full guide.
+
+> **Important:** Credentials go in **[Google Cloud Console](https://console.cloud.google.com)** (not myaccount.google.com). `GOOGLE_CLIENT_ID` must end in `.apps.googleusercontent.com`. GitHub IDs (`Ov23…`) go in `GH_OAUTH_CLIENT_ID` only — never in `GOOGLE_CLIENT_ID`.
 
 ### Google Cloud Console
 
@@ -141,28 +143,39 @@ The deploy worked, but OAuth login won't until you register the frontend URL as 
 2. Open your **OAuth 2.0 Client ID** (web application).
 3. Under **Authorized redirect URIs**, add:
    ```
-   https://<your-frontend-fqdn>/api/auth/google/callback
+   https://<your-app-fqdn>/api/auth/google/callback
    ```
 4. **Save**.
 
 ### GitHub
 
 1. https://github.com/settings/developers → **OAuth Apps** → your app.
-2. Replace **Authorization callback URL** with:
+2. Set **Authorization callback URL** to:
    ```
-   https://<your-frontend-fqdn>/api/auth/github/callback
+   https://<your-app-fqdn>/api/auth/github/callback
    ```
 3. **Update application**.
 
-> The backend's `FRONTEND_URL` env var is already set to `https://<FQDN>` by `scripts/deploy-ci.sh`, so the OAuth flow will redirect back correctly once the redirect URIs are registered.
+> `scripts/deploy-ci.sh` sets `FRONTEND_URL` and `BACKEND_URL` to `https://<FQDN>` on the backend container. Callback URLs use the same public origin (nginx proxies `/api` to the backend).
+
+### Verify secrets before testing
+
+After updating GitHub secrets, **redeploy**. Then confirm the live app sends the right Google client ID:
+
+```bash
+curl -sS -D - -o /dev/null "https://<app-fqdn>/api/auth/google" | grep -i client_id
+```
+
+The `client_id` query parameter must be a Google ID (`.apps.googleusercontent.com`), not `Ov23…`.
 
 ## Step 9 — Test the app
 
-1. Open `https://<your-frontend-fqdn>` in a browser.
-2. Click **Continue with Google** or **Continue with GitHub**.
-3. You should be redirected to the provider's consent screen, then back to the app dashboard.
-4. Create a habit, check it in, and verify streaks calculate.
-5. Open DevTools → Network → filter by **WS** to confirm the WebSocket connects.
+1. Open `https://<your-app-fqdn>` in a browser.
+2. **401 on `/api/auth/me` in DevTools before login is normal** — the app checks for an existing session.
+3. Click **Continue with Google** or **Continue with GitHub** (Demo Login is disabled in production).
+4. After provider consent, you should land on the dashboard; `/api/auth/me` returns **200**.
+5. Create a habit, check in, and verify streaks calculate.
+6. DevTools → Network → **WS** to confirm the WebSocket connects.
 
 ## Step 10 — (Optional) Auto-deploy on every push
 
@@ -186,30 +199,35 @@ The access token you pushed has expired (it's valid ~60 minutes). This is the ex
 
 > For a durable, no-refresh setup, switch to a service principal (Option A): see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
 
-### Workflow fails: "Failed to retrieve backend FQDN"
+### Workflow fails: "Failed to retrieve app FQDN"
 
-The backend Container App hasn't fully started. This is usually transient — the script waits 15s after create, but a cold ACR + Container Apps Environment can take longer. **Re-run the workflow** after a couple of minutes; it's idempotent (reuses existing resources).
+The Container App hasn't fully started. Usually transient — **re-run the workflow** after a couple of minutes.
 
-To inspect:
 ```bash
-az containerapp show --name backend-app --resource-group <RG>
-az containerapp logs show --name backend-app --resource-group <RG> --follow
+az containerapp show --name habit-tracker-app --resource-group <RG>
+az containerapp logs show --name habit-tracker-app --resource-group <RG> --container backend --follow
+az containerapp logs show --name habit-tracker-app --resource-group <RG> --container frontend --follow
 ```
 
-### Frontend shows 502 Bad Gateway
+### Frontend shows 504 Gateway Timeout on `/api/*`
 
-The nginx proxy can't reach the backend. Causes:
-- Backend not yet up (wait 2–3 min, refresh).
-- `nginx.conf` rewrite didn't take (check the deploy log for the `nginx.conf now proxies to:` line).
-- Backend is crashing on boot (check backend logs; most common cause is a `SESSION_SECRET` under 32 chars, which the script now rejects early).
+Historically caused by broken ACA **internal ingress** between separate `frontend-app` and `backend-app`. Current deploy uses **one app, two containers**, with nginx proxying to `127.0.0.1:3000`. See [AZURE_INTERNAL_INGRESS_ISSUE.md](./AZURE_INTERNAL_INGRESS_ISSUE.md).
 
-### OAuth login fails ("redirect_uri_mismatch" or similar)
+### OAuth: Google "OAuth client was not found" / `invalid_client`
 
-The redirect URI you registered doesn't exactly match what the backend sends. Both must be:
-- `https://<frontend-fqdn>/api/auth/google/callback` (Google)
-- `https://<frontend-fqdn>/api/auth/github/callback` (GitHub)
+`GOOGLE_CLIENT_ID` in GitHub secrets is wrong — often the GitHub client ID was pasted into the Google slot. Fix secrets, redeploy, verify with the `curl` check in Step 8.
 
-The `<frontend-fqdn>` must be the exact value from Step 7 (no trailing slash, no `http`).
+### OAuth: login completes but `/api/auth/me` stays 401
+
+Session cookie not persisted. Ensure latest `nginx.azure.conf` is deployed (`X-Forwarded-Proto: https`). Redeploy after pulling current code.
+
+### OAuth: "redirect_uri_mismatch"
+
+Registered callback must exactly match:
+- `https://<app-fqdn>/api/auth/google/callback` (Google)
+- `https://<app-fqdn>/api/auth/github/callback` (GitHub)
+
+No trailing slash, use `https`.
 
 ### ACR name already taken
 
@@ -237,7 +255,7 @@ To tear down everything and stop incurring costs:
 az group delete --name <AZURE_RESOURCE_GROUP> --yes
 ```
 
-This deletes the resource group, the ACR (and all images), the Container Apps Environment, and both Container Apps.
+This deletes the resource group, the ACR (and all images), the Container Apps Environment, and the Container App.
 
 ---
 

@@ -14,10 +14,9 @@ set -euo pipefail
 #   1. No prompts — every input is an env var (required ones are validated).
 #   2. No confirmation prompt — CI must not block on user input.
 #   3. No color — plain stdout for log readability.
-#   4. Single frontend image build — the frontend is built ONCE, after
-#      frontend/nginx.conf is rewritten with the real backend FQDN. The
-#      manual script builds the frontend twice (v1 before the FQDN is known,
-#      v2 after); that first build is wasted work and is dropped here.
+#   4. Single Container App — backend + frontend run as two containers in one
+#      revision; nginx proxies to 127.0.0.1:3000 (avoids broken ACA internal
+#      ingress between separate apps; see docs/AZURE_INTERNAL_INGRESS_ISSUE.md).
 #   5. Portable in-place sed — uses a temp file + mv instead of `sed -i ''`
 #      (which is BSD/macOS-specific and misbehaves on GNU/Linux GitHub runners).
 #   6. No local Docker dependency — all image builds go through `az acr build`
@@ -41,8 +40,8 @@ set -euo pipefail
 #   GITHUB_CLIENT_SECRET         GitHub OAuth client secret
 #   SESSION_SECRET               32+ char session secret (see CLAUDE.md §3)
 #
-# Output: a deployed pair of Container Apps (backend internal, frontend
-# external) and the public frontend URL printed to stdout.
+# Output: a deployed Container App (external ingress on nginx) and the public
+# URL printed to stdout.
 # ---------------------------------------------------------------------------
 
 # --- 0. Validate required environment variables ---------------------------
@@ -88,9 +87,11 @@ fi
 # ACR name from the login server: myacr.azurecr.io -> myacr
 AZURE_REGISTRY_NAME="${AZURE_REGISTRY_LOGIN_SERVER%%.*}"
 
-BACKEND_APP_NAME="backend-app"
-FRONTEND_APP_NAME="frontend-app"
+APP_NAME="habit-tracker-app"
 ENVIRONMENT_NAME="habit-tracker-env"
+# Legacy two-app names — removed after successful unified deploy.
+LEGACY_BACKEND_APP="backend-app"
+LEGACY_FRONTEND_APP="frontend-app"
 
 # Repository root: this script lives in scripts/, so the parent is the root.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -100,16 +101,11 @@ echo "==> Deployment configuration"
 echo "    Resource Group:     $AZURE_RESOURCE_GROUP"
 echo "    Location:           $AZURE_LOCATION"
 echo "    ACR Name:           $AZURE_REGISTRY_NAME"
-echo "    ACR Login Server:   $AZURE_REGISTRY_LOGIN_SERVER"
-echo "    Backend App:        $BACKEND_APP_NAME"
-echo "    Frontend App:       $FRONTEND_APP_NAME"
+echo "    Container App:      $APP_NAME (backend + frontend)"
 echo "    Environment:        $ENVIRONMENT_NAME"
 echo "    Repo Root:          $SCRIPT_DIR"
 
 # --- 2. Ensure the resource group exists ----------------------------------
-# Authentication is handled upstream: in CI by the `azure/login@v2` action
-# (OIDC federation), locally by `az login`. The Azure CLI is already
-# authenticated when this script runs.
 
 echo ""
 echo "==> Ensuring resource group '$AZURE_RESOURCE_GROUP' exists"
@@ -143,11 +139,8 @@ else
   echo "    ACR created."
 fi
 
-# --- 4. Build and push the backend image ----------------------------------
-# The build context is the repository root (npm workspaces monorepo; the
-# Dockerfile expects to find package.json, package-lock.json, and
-# tsconfig.base.json at the root). `az acr build` runs the build in Azure,
-# so no local Docker daemon is required.
+# --- 4. Build and push both images ----------------------------------------
+# Build context is the repository root (npm workspaces monorepo).
 
 echo ""
 echo "==> Building backend image (az acr build)"
@@ -159,6 +152,21 @@ az acr build \
   "$SCRIPT_DIR" \
   --output none
 echo "    Backend image built and pushed."
+
+echo ""
+echo "==> Building frontend image (az acr build, nginx.azure.conf for localhost upstream)"
+az acr build \
+  --registry "$AZURE_REGISTRY_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --image habit-tracker-frontend:latest \
+  --file frontend/Dockerfile \
+  --build-arg NGINX_CONF=nginx.azure.conf \
+  "$SCRIPT_DIR" \
+  --output none
+echo "    Frontend image built and pushed."
+
+BACKEND_IMAGE="${AZURE_REGISTRY_LOGIN_SERVER}/habit-tracker-backend:latest"
+FRONTEND_IMAGE="${AZURE_REGISTRY_LOGIN_SERVER}/habit-tracker-frontend:latest"
 
 # --- 5. Ensure the Container Apps Environment exists ----------------------
 
@@ -179,187 +187,146 @@ else
   sleep 15
 fi
 
-# --- 6. Deploy (or update) the backend Container App ----------------------
-# Ingress is internal: the frontend nginx proxies /api and /ws to it.
-# FRONTEND_URL is set to a placeholder now and corrected in step 11 once the
-# frontend's public FQDN is known (used for OAuth redirect back-URLs and CORS).
+# --- 6. Render multi-container YAML and deploy ----------------------------
 
-BACKEND_IMAGE="${AZURE_REGISTRY_LOGIN_SERVER}/habit-tracker-backend:latest"
+CONTAINERAPP_YAML="$(mktemp)"
+trap 'rm -f "$CONTAINERAPP_YAML"' EXIT
+
+sed \
+  -e "s|__BACKEND_IMAGE__|${BACKEND_IMAGE}|g" \
+  -e "s|__FRONTEND_IMAGE__|${FRONTEND_IMAGE}|g" \
+  "$SCRIPT_DIR/scripts/containerapp.yaml.tpl" > "$CONTAINERAPP_YAML"
 
 echo ""
-echo "==> Deploying backend Container App ($BACKEND_APP_NAME)"
+echo "==> Deploying unified Container App ($APP_NAME)"
 if az containerapp show \
-    --name "$BACKEND_APP_NAME" \
+    --name "$APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --output none 2>/dev/null; then
   az containerapp update \
-    --name "$BACKEND_APP_NAME" \
+    --name "$APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
-    --image "$BACKEND_IMAGE" \
-    --min-replicas 1 \
-    --set-env-vars \
-      NODE_ENV=production \
-      PORT=3000 \
-      DATABASE_PATH=/data/habits.db \
-      SESSION_SECRET="$SESSION_SECRET" \
-      GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-      GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-      GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
-      GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
-      FRONTEND_URL="https://placeholder.azurecontainerapps.io" \
+    --yaml "$CONTAINERAPP_YAML" \
     --output none
-  echo "    Backend app updated."
+  echo "    Container app updated."
 else
+  # Initial create must use the CLI, not --yaml: az containerapp create --yaml
+  # injects null ingress booleans into the PUT body and ARM returns HTTP 400
+  # ("JSON value could not be converted to System.Boolean"). Create a minimal
+  # single-container app first, then patch to the multi-container template.
   az containerapp create \
-    --name "$BACKEND_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --environment "$ENVIRONMENT_NAME" \
-    --image "$BACKEND_IMAGE" \
-    --target-port 3000 \
-    --min-replicas 1 \
-    --ingress internal \
-    --registry-server "$AZURE_REGISTRY_LOGIN_SERVER" \
-    --env-vars \
-      NODE_ENV=production \
-      PORT=3000 \
-      DATABASE_PATH=/data/habits.db \
-      SESSION_SECRET="$SESSION_SECRET" \
-      GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-      GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-      GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
-      GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
-      FRONTEND_URL="https://placeholder.azurecontainerapps.io" \
-    --output none
-  echo "    Backend app created."
-fi
-
-# --- 6b. Keep one backend replica warm (minReplicas=1) ---------------------
-# The backend runs on the ACA **Consumption** workload profile, which autoscales
-# to ZERO when idle (minReplicas defaults to 0). The next request after idle
-# then triggers a cold start (image pull + Node boot + SQLite open) that can
-# exceed the ingress gateway timeout, so the client gets a **504 Gateway
-# Timeout** on the first hit — intermittent 504s on /api/* after quiet periods.
-#
-# `minReplicas: 1` keeps one replica resident so there is no cold start. This
-# is the real fix for the 504s; it is NOT a port-exposure issue (the valid
-# routing field `ingress.targetPort` is set by --target-port 3000 above, and the
-# ContainerAppContainer schema has no `ports` field — the API rejects it).
-#
-# Idempotent: re-applied on every deploy (update path included).
-
-echo ""
-echo "==> Keeping one backend replica warm (min-replicas 1)"
-az containerapp update \
-  --name "$BACKEND_APP_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --min-replicas 1 \
-  --output none
-echo "    Backend min-replicas set to 1 (no cold-start 504s)."
-
-# --- 7. Verify backend is ready -----------------------------------------------
-# Inside Azure Container Apps, containers in the same environment reach each other
-# using internal service discovery (app-name:port). The frontend nginx.conf uses
-# backend-app:3000, which is already correct and doesn't need updating.
-
-echo ""
-echo "==> Waiting for backend to be ready"
-sleep 15
-echo "    Backend ready (internal service discovery via backend-app:3000)"
-
-# --- 8. Build and push the frontend image ---------------------------------
-# The frontend's nginx.conf is static (uses backend-app:3000 for internal service
-# discovery), so no rewrite is needed. Just build and push the image.
-
-FRONTEND_IMAGE="${AZURE_REGISTRY_LOGIN_SERVER}/habit-tracker-frontend:latest"
-
-echo ""
-echo "==> Building frontend image (az acr build, with corrected nginx.conf)"
-az acr build \
-  --registry "$AZURE_REGISTRY_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --image habit-tracker-frontend:latest \
-  --file frontend/Dockerfile \
-  "$SCRIPT_DIR" \
-  --output none
-echo "    Frontend image built and pushed."
-
-# --- 9. Deploy (or update) the frontend Container App ---------------------
-# Ingress is external: this is the public HTTPS URL.
-
-echo ""
-echo "==> Deploying frontend Container App ($FRONTEND_APP_NAME)"
-if az containerapp show \
-    --name "$FRONTEND_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --output none 2>/dev/null; then
-  az containerapp update \
-    --name "$FRONTEND_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --image "$FRONTEND_IMAGE" \
-    --output none
-  echo "    Frontend app updated."
-else
-  az containerapp create \
-    --name "$FRONTEND_APP_NAME" \
+    --name "$APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --environment "$ENVIRONMENT_NAME" \
     --image "$FRONTEND_IMAGE" \
     --target-port 80 \
     --ingress external \
     --registry-server "$AZURE_REGISTRY_LOGIN_SERVER" \
+    --min-replicas 1 \
     --output none
-  echo "    Frontend app created."
+  echo "    Container app created (frontend-only bootstrap)."
+  az containerapp update \
+    --name "$APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --yaml "$CONTAINERAPP_YAML" \
+    --output none
+  echo "    Multi-container template applied."
 fi
 
-# --- 10. Retrieve the frontend's public FQDN ------------------------------
+# --- 7. Set backend secrets and OAuth env vars ----------------------------
+# Kept off the YAML file so secrets are not written to disk in the template.
 
 echo ""
-echo "==> Waiting for frontend to be ready, then retrieving public FQDN"
+echo "==> Configuring backend container environment"
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --container-name backend \
+  --min-replicas 1 \
+  --set-env-vars \
+    NODE_ENV=production \
+    PORT=3000 \
+    DATABASE_PATH=/data/habits.db \
+    SESSION_SECRET="$SESSION_SECRET" \
+    GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
+    GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
+    GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+    GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
+    FRONTEND_URL="https://placeholder.azurecontainerapps.io" \
+    BACKEND_URL="https://placeholder.azurecontainerapps.io" \
+  --output none
+echo "    Backend env vars set (OAuth URLs updated after FQDN is known)."
+
+# --- 8. Retrieve the public FQDN ------------------------------------------
+
+echo ""
+echo "==> Waiting for app to be ready, then retrieving public FQDN"
 sleep 15
 
-FRONTEND_FQDN=$(az containerapp show \
-  --name "$FRONTEND_APP_NAME" \
+APP_FQDN=$(az containerapp show \
+  --name "$APP_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --query 'properties.configuration.ingress.fqdn' -o tsv)
 
-if [[ -z "$FRONTEND_FQDN" || "$FRONTEND_FQDN" == "None" ]]; then
-  echo "ERROR: Failed to retrieve frontend FQDN."
-  echo "       Inspect the app: az containerapp show --name $FRONTEND_APP_NAME --resource-group $AZURE_RESOURCE_GROUP"
+if [[ -z "$APP_FQDN" || "$APP_FQDN" == "None" ]]; then
+  echo "ERROR: Failed to retrieve app FQDN."
+  echo "       Inspect the app: az containerapp show --name $APP_NAME --resource-group $AZURE_RESOURCE_GROUP"
   exit 1
 fi
-echo "    Frontend FQDN: $FRONTEND_FQDN"
+echo "    App FQDN: $APP_FQDN"
 
-# --- 11. Update the backend with the real FRONTEND_URL --------------------
-# The backend uses FRONTEND_URL for OAuth redirect back-URLs and CORS. It was
-# set to a placeholder in step 7; correct it now that we know the real URL.
+# --- 9. Update OAuth redirect URLs ------------------------------------------
+# Both FRONTEND_URL and BACKEND_URL use the public HTTPS origin. OAuth
+# callbacks hit /api/auth/*/callback through nginx, not the backend directly.
 
 echo ""
-echo "==> Updating backend with real FRONTEND_URL"
+echo "==> Updating backend OAuth URLs"
 az containerapp update \
-  --name "$BACKEND_APP_NAME" \
+  --name "$APP_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --set-env-vars "FRONTEND_URL=https://${FRONTEND_FQDN}" \
+  --container-name backend \
+  --set-env-vars \
+    "FRONTEND_URL=https://${APP_FQDN}" \
+    "BACKEND_URL=https://${APP_FQDN}" \
   --output none
-echo "    Backend FRONTEND_URL set to https://$FRONTEND_FQDN"
+echo "    FRONTEND_URL and BACKEND_URL set to https://$APP_FQDN"
 
-# --- 12. Summary ---------------------------------------------------------------
+# --- 10. Remove legacy two-app deployment (if present) --------------------
+
+echo ""
+echo "==> Cleaning up legacy separate Container Apps (if any)"
+for legacy in "$LEGACY_BACKEND_APP" "$LEGACY_FRONTEND_APP"; do
+  if az containerapp show \
+      --name "$legacy" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --output none 2>/dev/null; then
+    az containerapp delete \
+      --name "$legacy" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --yes \
+      --output none
+    echo "    Deleted legacy app: $legacy"
+  fi
+done
+
+# --- 11. Summary ----------------------------------------------------------
 
 echo ""
 echo "============================================================"
 echo "  DEPLOYMENT SUCCESSFUL"
 echo "============================================================"
 echo ""
-echo "  Frontend URL:   https://$FRONTEND_FQDN"
-echo "  Backend:        backend-app:3000 (internal service discovery)"
+echo "  App URL:        https://$APP_FQDN"
+echo "  Architecture:   single Container App (nginx + backend via localhost)"
 echo "  Resource Group: $AZURE_RESOURCE_GROUP"
 echo "  ACR:            $AZURE_REGISTRY_NAME"
 echo ""
 echo "  Next steps:"
 echo "    1. Register OAuth redirect URIs (see docs/SETUP_CI_CD.md):"
-echo "         Google: https://$FRONTEND_FQDN/api/auth/google/callback"
-echo "         GitHub: https://$FRONTEND_FQDN/api/auth/github/callback"
-echo "    2. Open https://$FRONTEND_FQDN and test login."
+echo "         Google: https://$APP_FQDN/api/auth/google/callback"
+echo "         GitHub: https://$APP_FQDN/api/auth/github/callback"
+echo "    2. Open https://$APP_FQDN and test login."
 echo ""
 # Emit a machine-readable marker so the workflow step summary / post-deploy
 # tooling can scrape the URL from the log.
-echo "FRONTEND_URL=https://$FRONTEND_FQDN"
+echo "FRONTEND_URL=https://$APP_FQDN"

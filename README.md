@@ -1,4 +1,4 @@
-# 🎯 Habit Tracker with Streaks
+# 🎯 Habit Tracker with Streaks with Qwen3.8-27B-FP8
 
 [![Node.js](https://img.shields.io/badge/Node.js-20-green?style=flat-square)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?style=flat-square)](https://www.typescriptlang.org)
@@ -20,8 +20,10 @@ Full-stack MVP habit tracking app with daily check-ins, streak calculation, sing
 
 What you get:
 - A **GitHub Actions workflow** that builds and deploys on every push to `main` (or on manual trigger).
-- **Azure Container Apps** — backend (internal) + frontend (public HTTPS URL), scaling to zero when idle.
-- **No local Docker or CLI needed** for the deploy — images are built by Azure's managed build service.
+- **One Azure Container App** (`habit-tracker-app`) with nginx + backend in a single revision (public HTTPS URL).
+- **No local Docker or CLI needed** for CI deploy — images are built by Azure's managed build service (`az acr build`).
+
+OAuth on Azure: credentials go in **GitHub secrets** and **Google Cloud Console** (not myaccount.google.com). See **[docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)**.
 
 Other deployment options:
 - **Manual deployment (CLI):** [DEPLOY_AZURE.md](./DEPLOY_AZURE.md) — interactive `deploy.sh` with prompts.
@@ -257,7 +259,11 @@ Copy the output to `SESSION_SECRET` in your `.env` file.
      - For local dev: `http://localhost:3000/api/auth/github/callback`
 4. Copy **Client ID** and **Client Secret** to your `.env` file
 
-**Note:** These URIs are built dynamically from `BACKEND_URL` and `FRONTEND_URL` at runtime — register the callback URLs in OAuth apps using the values you set in `.env`, and they will work in both local dev and production.
+**Note:** Callback URIs are built from `BACKEND_URL` at runtime. On Azure, both `BACKEND_URL` and `FRONTEND_URL` are set to the public app FQDN (nginx proxies `/api` to the backend).
+
+**Azure CI secrets:** use `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` for Google and `GH_OAUTH_CLIENT_ID` / `GH_OAUTH_CLIENT_SECRET` for GitHub (GitHub forbids `GITHUB_*` secret names in Actions). Do **not** put a GitHub client ID (`Ov23…`) in `GOOGLE_CLIENT_ID`.
+
+Full guide: **[docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)**
 
 ---
 
@@ -632,6 +638,15 @@ This approach was deliberately chosen for:
 - Confirm redirect URIs match in OAuth app settings
 - Check that frontend and backend URLs are correct in `.env`
 
+### Google: "OAuth client was not found" / `invalid_client` (Azure)
+- `GOOGLE_CLIENT_ID` in GitHub secrets is wrong — often the GitHub ID (`Ov23…`) was pasted into the Google slot
+- Fix secrets, redeploy, verify: `curl -sS -D - -o /dev/null "https://<app-fqdn>/api/auth/google" | grep client_id`
+- See [docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)
+
+### `/api/auth/me` returns 401 after OAuth (Azure)
+- Expected **before** login; if it persists **after** Google/GitHub consent, redeploy with current `nginx.azure.conf` (`X-Forwarded-Proto: https`)
+- See [docs/AZURE_INTERNAL_INGRESS_ISSUE.md](./docs/AZURE_INTERNAL_INGRESS_ISSUE.md)
+
 ### Database errors
 - Run `npm run db:migrate` to ensure schema is created
 - Delete `data/habits.db` and re-run migrations if corrupted
@@ -708,7 +723,8 @@ npm run dev
 - **[docs/SPEC.md](./docs/SPEC.md)** — Complete implementation specification (authoritative source)
 
 ### OAuth & Security
-- **[docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)** — Step-by-step Google and GitHub OAuth setup
+- **[docs/OAUTH_SETUP.md](./docs/OAUTH_SETUP.md)** — Google/GitHub OAuth (local + Azure), credential formats, troubleshooting
+- **[docs/AZURE_INTERNAL_INGRESS_ISSUE.md](./docs/AZURE_INTERNAL_INGRESS_ISSUE.md)** — ACA ingress workaround and session-cookie fix
 - **[docs/SECURITY.md](./docs/SECURITY.md)** — Security architecture and best practices
 - **[docs/AZURE_OIDC_SETUP.md](./docs/AZURE_OIDC_SETUP.md)** — Azure OIDC federation for CI/CD
 

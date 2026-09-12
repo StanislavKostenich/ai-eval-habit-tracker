@@ -101,7 +101,7 @@ jobs:
           RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
           FQDN=$(az containerapp show \
-            --name frontend-app \
+            --name habit-tracker-app \
             --resource-group "$RESOURCE_GROUP" \
             --query 'properties.configuration.ingress.fqdn' -o tsv 2>/dev/null || echo "")
           if [[ -z "$FQDN" || "$FQDN" == "None" ]]; then

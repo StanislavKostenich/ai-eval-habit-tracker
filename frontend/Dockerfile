@@ -12,7 +12,8 @@
 #   builder  — Node 20; installs the workspace, runs `npm run build` (tsc
 #              typecheck + vite build) -> frontend/dist/ static assets.
 #   runtime  — nginx:stable; serves frontend/dist/ and reverse-proxies /api and
-#              /ws to the `backend` compose service (see frontend/nginx.conf).
+#              /ws to the backend (127.0.0.1:3000 in ACA multi-container;
+#              `backend:3000` in docker-compose — see frontend/nginx.conf).
 #
 # The frontend only ever issues RELATIVE requests (/api/..., ws://host/ws) so
 # the same bundle works through the Vite dev proxy and through this nginx proxy
@@ -46,7 +47,9 @@ FROM nginx:stable AS runtime
 # Vite output -> nginx web root.
 COPY --from=builder /repo/frontend/dist /usr/share/nginx/html
 
-# SPA fallback + /api and /ws reverse proxy to the `backend` compose service.
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# SPA fallback + /ws reverse proxy. Default nginx.conf targets docker-compose
+# (`backend:3000`); Azure deploy passes NGINX_CONF=nginx.azure.conf (127.0.0.1).
+ARG NGINX_CONF=nginx.conf
+COPY frontend/${NGINX_CONF} /etc/nginx/conf.d/default.conf
 
 EXPOSE 80

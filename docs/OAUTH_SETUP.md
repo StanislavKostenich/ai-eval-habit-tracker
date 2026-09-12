@@ -1,96 +1,186 @@
 # OAuth Setup Guide
 
-This app supports Google and GitHub login. Follow these steps to set up OAuth credentials.
+This app supports **Google** and **GitHub** login. Credentials are configured in different places depending on environment:
+
+| Environment | Where credentials go |
+|---|---|
+| Local dev | `.env` file |
+| Azure (CI/CD) | GitHub Actions **secrets** → injected by `scripts/deploy-ci.sh` |
+
+> **Not here:** [myaccount.google.com](https://myaccount.google.com) is your personal Google Account settings (password, privacy). OAuth Client IDs are created in **[Google Cloud Console](https://console.cloud.google.com)**.
+
+---
+
+## Credential formats (don't mix them up)
+
+| Provider | Client ID looks like | GitHub secret name (CI) | `.env` name (local) |
+|---|---|---|---|
+| Google | `123456789-abc.apps.googleusercontent.com` | `GOOGLE_CLIENT_ID` | `GOOGLE_CLIENT_ID` |
+| GitHub | `Ov23li…` or similar | `GH_OAUTH_CLIENT_ID` | `GITHUB_CLIENT_ID` |
+
+GitHub forbids repository secrets named `GITHUB_*`, so CI stores GitHub OAuth credentials as `GH_OAUTH_CLIENT_ID` / `GH_OAUTH_CLIENT_SECRET`. The workflow maps them to the app's `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` env vars.
+
+**Common mistake:** putting the GitHub Client ID (`Ov23…`) in `GOOGLE_CLIENT_ID`. Google then shows **“OAuth client was not found” / `401: invalid_client`**.
+
+---
 
 ## Google OAuth Setup
 
-1. **Go to Google Cloud Console**
-   - Visit https://console.cloud.google.com/
-   - Sign in with your Google account
+1. Open **[Google Cloud Console](https://console.cloud.google.com/)** (not myaccount.google.com).
+2. Create or select a **project**.
+3. Configure the **OAuth consent screen** (APIs & Services → OAuth consent screen). For a demo, **External** + **Testing** mode is fine; add test users if not published.
+4. Go to **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**.
+5. Application type: **Web application**.
+6. Add **Authorized redirect URIs** (see table below).
+7. Copy **Client ID** and **Client Secret**.
 
-2. **Create a new project**
-   - Click the project dropdown at the top
-   - Click "New Project"
-   - Name it "Habit Tracker" and create
+### Redirect URIs
 
-3. **Enable Google+ API**
-   - In the left sidebar, go to "APIs & Services" → "Enabled APIs & services"
-   - Click "Enable APIs and Services"
-   - Search for "Google+ API"
-   - Click it and press "Enable"
+| Environment | Authorized redirect URI |
+|---|---|
+| Local (Vite proxy) | `http://localhost:3000/api/auth/google/callback` |
+| Docker Compose | `http://localhost:8080/api/auth/google/callback` if using port 8080, or match your `BACKEND_URL` |
+| Azure | `https://<app-fqdn>/api/auth/google/callback` |
 
-4. **Create OAuth 2.0 credentials**
-   - Go to "APIs & Services" → "Credentials"
-   - Click "Create Credentials" → "OAuth 2.0 Client ID"
-   - Application type: "Web application"
-   - Add authorized redirect URIs:
-     - `http://localhost:3000/api/auth/google/callback`
-   - Click Create
+On Azure, `<app-fqdn>` is the Container App FQDN, e.g. `habit-tracker-app.salmonrock-7165d699.eastus.azurecontainerapps.io`. Get it after deploy:
 
-5. **Copy your credentials**
-   - Copy `Client ID` → `GOOGLE_CLIENT_ID` in `.env`
-   - Copy `Client Secret` → `GOOGLE_CLIENT_SECRET` in `.env`
+```bash
+az containerapp show \
+  --name habit-tracker-app \
+  --resource-group <RG> \
+  --query 'properties.configuration.ingress.fqdn' -o tsv
+```
+
+---
 
 ## GitHub OAuth Setup
 
-1. **Go to GitHub Settings**
-   - Visit https://github.com/settings/developers
-   - Click "OAuth Apps" (or "New OAuth App")
+1. Go to **[GitHub Developer Settings](https://github.com/settings/developers)** → **OAuth Apps** → **New OAuth App** (or edit existing).
+2. Fill in:
+   - **Application name:** Habit Tracker
+   - **Homepage URL:** your app URL (local: `http://localhost:5173`; Azure: `https://<app-fqdn>`)
+   - **Authorization callback URL:** see table below
+3. Copy **Client ID** and generate **Client Secret**.
 
-2. **Create a new OAuth App**
-   - Application name: "Habit Tracker"
-   - Homepage URL: `http://localhost:3000`
-   - Authorization callback URL: `http://localhost:3000/api/auth/github/callback`
-   - Click "Register application"
+### Callback URLs
 
-3. **Copy your credentials**
-   - Copy `Client ID` → `GITHUB_CLIENT_ID` in `.env`
-   - Click "Generate a new client secret" and copy it → `GITHUB_CLIENT_SECRET` in `.env`
+| Environment | Authorization callback URL |
+|---|---|
+| Local | `http://localhost:3000/api/auth/github/callback` |
+| Azure | `https://<app-fqdn>/api/auth/github/callback` |
 
-## Update .env File
+---
+
+## Local development (`.env`)
 
 ```bash
-GOOGLE_CLIENT_ID=your_google_client_id_here
-GOOGLE_CLIENT_SECRET=your_google_client_secret_here
-GITHUB_CLIENT_ID=your_github_client_id_here
-GITHUB_CLIENT_SECRET=your_github_client_secret_here
-SESSION_SECRET=generate_a_random_32_char_string_here
-DATABASE_PATH=./data/habits.db
-PORT=3000
+GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+SESSION_SECRET=<32+ random chars>
+BACKEND_URL=http://localhost:3000
 FRONTEND_URL=http://localhost:5173
 ```
 
-**Important:** Never commit `.env` to git. It's already in `.gitignore`.
-
-## Generate SESSION_SECRET
+Generate `SESSION_SECRET`:
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(16).toString('hex'))"
+openssl rand -hex 32
 ```
 
-Copy the output and use it for `SESSION_SECRET`.
+**Never commit `.env`** — it is in `.gitignore`.
 
-## Testing OAuth
+Start the app: `npm run dev` → http://localhost:5173/login
 
-1. Start the app: `npm run dev`
-2. Go to http://localhost:5173/login
-3. Click "Continue with Google" or "Continue with GitHub"
-4. You'll be redirected to the OAuth provider
-5. Authorize the app
-6. You'll be logged in and redirected to the dashboard
+---
+
+## Azure production (GitHub Actions + Container Apps)
+
+### 1. Register secrets in GitHub
+
+Repo → **Settings** → **Secrets and variables** → **Actions**:
+
+| Secret | Value |
+|---|---|
+| `GOOGLE_CLIENT_ID` | From Google Cloud Console |
+| `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
+| `GH_OAUTH_CLIENT_ID` | From GitHub OAuth App |
+| `GH_OAUTH_CLIENT_SECRET` | From GitHub OAuth App |
+| `SESSION_SECRET` | `openssl rand -hex 32` (keeps sessions stable across redeploys) |
+
+### 2. Deploy
+
+```bash
+bash scripts/refresh-azure-token.sh   # before CI deploy
+bash scripts/deploy-ci.sh             # or push to main
+```
+
+The script sets on the **backend** container:
+
+- `FRONTEND_URL=https://<app-fqdn>`
+- `BACKEND_URL=https://<app-fqdn>`
+
+OAuth callbacks use `BACKEND_URL` + `/api/auth/<provider>/callback` — the same public origin nginx proxies to the backend.
+
+### 3. Register redirect URIs with Google and GitHub
+
+Use the **exact** FQDN from deploy (printed as `FRONTEND_URL=…` in logs):
+
+```
+https://<app-fqdn>/api/auth/google/callback
+https://<app-fqdn>/api/auth/github/callback
+```
+
+### 4. Verify deployed client IDs
+
+After deploy, check what the live app sends (Google ID must end in `.apps.googleusercontent.com`):
+
+```bash
+curl -sS -D - -o /dev/null "https://<app-fqdn>/api/auth/google" | grep -i location
+curl -sS -D - -o /dev/null "https://<app-fqdn>/api/auth/github" | grep -i location
+```
+
+If both show the same `client_id=Ov23…`, fix `GOOGLE_CLIENT_ID` in GitHub secrets and **redeploy**.
+
+### 5. Demo Login on Azure
+
+**Demo Login is disabled in production** (`NODE_ENV=production` → `POST /api/auth/demo-login` returns 404). Use Google or GitHub on the live URL.
+
+---
+
+## How OAuth works for all users
+
+Your OAuth client ID/secret identify **your app** to Google/GitHub, not you personally. Each visitor signs in with **their own** Google/GitHub account; the backend creates a separate `users` row per person. Secrets stay on the server (Azure env vars / GitHub secrets), never in the browser.
+
+---
 
 ## Troubleshooting
 
-### "Redirect URI mismatch" error
-- Make sure the callback URL in your OAuth app matches exactly
-- For local development: `http://localhost:3000/api/auth/google/callback`
+### Google: “OAuth client was not found” / `401: invalid_client`
 
-### "Invalid Client" error
-- Verify your Client ID and Secret are correct
-- Check they're in the `.env` file (not `.env.example`)
-- Restart the app after changing `.env`
+- `GOOGLE_CLIENT_ID` in GitHub secrets is wrong (often the GitHub ID was pasted).
+- Fix secrets, redeploy, verify redirect URL `client_id` as above.
 
-### Session issues
-- The app stores sessions in `./data/sessions.db`
-- If you have issues, delete this file and restart
-- Sessions persist across restarts with the SQLite store
+### “Redirect URI mismatch”
+
+- Callback URL in Google/GitHub must **exactly** match `https://<app-fqdn>/api/auth/<provider>/callback` (no trailing slash, `https` not `http`).
+
+### Login succeeds but `/api/auth/me` stays 401
+
+- Session cookie not set. Ensure the frontend image was built with `nginx.azure.conf` (`X-Forwarded-Proto: https`). Redeploy after pulling latest code.
+- Check DevTools → Application → Cookies for `sessionId` on your app domain.
+
+### Google consent screen: “Access blocked” (app in Testing)
+
+- Add the user's Gmail as a **Test user** on the OAuth consent screen, or publish the app.
+
+### Local: “Invalid Client”
+
+- Verify Client ID/Secret in `.env`, restart backend after changes.
+
+### Session issues (local)
+
+- Sessions live in SQLite (`DATABASE_PATH`). Delete the DB file only if you intend to reset all data.
+
+See also [SETUP_CI_CD.md](./SETUP_CI_CD.md) and [AZURE_INTERNAL_INGRESS_ISSUE.md](./AZURE_INTERNAL_INGRESS_ISSUE.md).

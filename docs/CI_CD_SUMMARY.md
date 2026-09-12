@@ -1,24 +1,37 @@
 # CI/CD Implementation Summary
 
-This project now deploys to Azure Container Apps automatically via GitHub Actions. Every push to `main` (or a manual trigger) builds the backend and frontend Docker images, pushes them to Azure Container Registry, and deploys/updates the two Container Apps.
+This project deploys to Azure Container Apps automatically via GitHub Actions. Every push to `main` (or a manual trigger) builds the backend and frontend Docker images, pushes them to Azure Container Registry, and deploys/updates a **single multi-container Container App**.
 
 ## New files
 
 | File | Purpose |
 |---|---|
-| `.github/workflows/deploy-azure.yml` | GitHub Actions workflow. Triggers on `push: branches: [main]` and `workflow_dispatch`. Resolves `SESSION_SECRET`, installs the Azure CLI, runs `scripts/deploy-ci.sh`, then re-fetches and prints the deployed frontend URL. |
-| `scripts/deploy-ci.sh` | Non-interactive deploy script. All inputs via env vars, `set -euo pipefail`, no prompts, no color. Idempotent (reuses existing Azure resources). Authenticates via the pre-captured `AZURE_ACCESS_TOKEN` (device-code flow). |
-| `scripts/refresh-azure-token.sh` | Local helper: runs `az login --use-device-code` (interactive browser flow), captures the ~60-min access token, and pushes it to the `AZURE_ACCESS_TOKEN` GitHub secret. Run before each deploy. |
-| `docs/AZURE_SERVICE_PRINCIPAL.md` | How to create a service principal — the durable "Option A" alternative to the device-code demo flow (requires an admin). |
-| `docs/SETUP_CI_CD.md` | End-to-end setup: clone → refresh token → register secrets/variables → first deploy → OAuth redirect URIs → test → troubleshooting. |
+| `.github/workflows/deploy-azure.yml` | GitHub Actions workflow. Triggers on `push: branches: [main]` and `workflow_dispatch`. Runs `scripts/deploy-ci.sh`, then fetches the public app URL. |
+| `scripts/deploy-ci.sh` | Non-interactive deploy script. All inputs via env vars, `set -euo pipefail`, idempotent. |
+| `scripts/containerapp.yaml.tpl` | Multi-container ACA template (backend + frontend in one revision). |
+| `frontend/nginx.azure.conf` | Azure nginx config: proxies `/api` and `/ws` to `127.0.0.1:3000`, sends `X-Forwarded-Proto: https` for session cookies. |
+| `scripts/refresh-azure-token.sh` | Refreshes the ~60-min `AZURE_ACCESS_TOKEN` GitHub secret before each deploy. |
+| `docs/AZURE_INTERNAL_INGRESS_ISSUE.md` | Post-mortem: ACA internal ingress TCP timeouts; why we use multi-container + localhost. |
+| `docs/SETUP_CI_CD.md` | End-to-end setup guide. |
+| `docs/OAUTH_SETUP.md` | OAuth credentials for local dev and Azure production. |
 
-## Modified files
+## Architecture (current)
 
-| File | Change |
-|---|---|
-| `README.md` | Added a **🚀 Deploy to Azure (GitHub Actions)** quick-start section linking to `docs/SETUP_CI_CD.md`. |
+```
+https://habit-tracker-app.<env>.azurecontainerapps.io  (external ingress)
+        |
+        v
+  Container App: habit-tracker-app
+  +------------------+------------------+
+  | frontend (nginx) | backend (Fastify)|
+  | :80              | :3000            |
+  +------------------+------------------+
+        nginx --127.0.0.1:3000--> backend
+```
 
-## How it works
+Legacy separate apps (`backend-app` + `frontend-app` with internal ingress) are **deleted on deploy**. See [AZURE_INTERNAL_INGRESS_ISSUE.md](./AZURE_INTERNAL_INGRESS_ISSUE.md).
+
+## How deploy works
 
 ```
 push to main  (or manual "Run workflow")
@@ -26,48 +39,35 @@ push to main  (or manual "Run workflow")
         v
   GitHub Actions: deploy-azure.yml
         |
-        |-- checkout code
-        |-- resolve SESSION_SECRET (use provided, or openssl rand -hex 32)
-        |-- install Azure CLI
-        |-- run scripts/deploy-ci.sh   (with secrets + vars as env)
-        |        |
-        |        |-- validate 10 required env vars
-        |        |-- export AZURE_AUTH (from AZURE_ACCESS_TOKEN; device-code)
-        |        |-- ensure resource group
-        |        |-- ensure ACR (Basic, admin-enabled)
-        |        |-- az acr build  backend  (context = repo root)
+        |-- checkout, resolve SESSION_SECRET
+        |-- az login (device-code token)
+        |-- scripts/deploy-ci.sh
+        |        |-- validate env vars
+        |        |-- ensure resource group + ACR
+        |        |-- az acr build  backend
+        |        |-- az acr build  frontend  (--build-arg NGINX_CONF=nginx.azure.conf)
         |        |-- ensure Container Apps Environment
-        |        |-- create/update backend-app (ingress: internal)
-        |        |-- wait, fetch backend internal FQDN
-        |        |-- rewrite frontend/nginx.conf  (backend:3000 -> FQDN)
-        |        |-- az acr build  frontend   (SINGLE build, post-rewrite)
-        |        |-- create/update frontend-app (ingress: external)
-        |        |-- wait, fetch frontend public FQDN
-        |        |-- update backend-app FRONTEND_URL=https://<FQDN>
-        |
-        |-- re-login, fetch frontend FQDN
-        |-- print deployment summary (success / failure)
+        |        |-- create/update habit-tracker-app (multi-container YAML)
+        |        |-- set backend OAuth env vars (GOOGLE_*, GITHUB_*, SESSION_SECRET)
+        |        |-- set FRONTEND_URL + BACKEND_URL to public FQDN
+        |        |-- delete legacy backend-app / frontend-app if present
         |
         v
-  https://<frontend-FQDN>   (live)
+  https://<app-FQDN>   (live)
 ```
 
 ## Secrets required (6, in GitHub repo settings)
 
-- `AZURE_ACCESS_TOKEN` (a fresh ~60-min token, refreshed via `scripts/refresh-azure-token.sh` before each deploy — device-code flow, no service principal)
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `GH_OAUTH_CLIENT_ID` (GitHub forbids `GITHUB_*` secret names; the workflow maps this to the app's `GITHUB_CLIENT_ID`)
-- `GH_OAUTH_CLIENT_SECRET` (mapped to the app's `GITHUB_CLIENT_SECRET`)
-- `SESSION_SECRET` (optional — auto-generated if absent, but set it to keep sessions stable across deploys)
+| Secret | Source | Notes |
+|---|---|---|
+| `AZURE_ACCESS_TOKEN` | `scripts/refresh-azure-token.sh` | Expires ~60 min; refresh before each deploy |
+| `GOOGLE_CLIENT_ID` | [Google Cloud Console](https://console.cloud.google.com) → Credentials | Must end in `.apps.googleusercontent.com` |
+| `GOOGLE_CLIENT_SECRET` | Same | **Not** the GitHub client ID |
+| `GH_OAUTH_CLIENT_ID` | GitHub → Developer settings → OAuth Apps | Usually starts with `Ov23` |
+| `GH_OAUTH_CLIENT_SECRET` | Same | Mapped to `GITHUB_CLIENT_ID` in the workflow |
+| `SESSION_SECRET` | `openssl rand -hex 32` | Optional in workflow (auto-generated); set explicitly to keep sessions across redeploys |
 
-> `AZURE_SUBSCRIPTION_ID` and `AZURE_TENANT_ID` are hardcoded in the workflow and in `refresh-azure-token.sh` (non-sensitive identifiers, not secrets).
-
-## Auth model
-
-The default auth is the **device-code flow** (no service principal). You refresh a personal access token locally before each deploy; it expires in ~60 minutes. For a durable, no-refresh setup, switch to a **service principal** (Option A, requires an admin) — see [AZURE_SERVICE_PRINCIPAL.md](./AZURE_SERVICE_PRINCIPAL.md).
-
-## Variables required (3, in GitHub repo settings)
+## Variables required (3)
 
 - `AZURE_RESOURCE_GROUP`
 - `AZURE_LOCATION`
@@ -78,20 +78,19 @@ The default auth is the **device-code flow** (no service principal). You refresh
 | Aspect | Manual (`deploy.sh`) | Automated (`deploy-ci.sh` + workflow) |
 |---|---|---|
 | Trigger | Run locally | Push to `main` or manual trigger |
-| Inputs | CLI flags + interactive prompts | GitHub secrets/variables |
-| Local deps | Azure CLI (Docker optional) | None (Azure CLI installed in CI; images built via `az acr build`) |
-| Frontend builds | 2 (v1 + v2) | **1** (single build after nginx rewrite) |
-| Best for | Learning the steps, one-off | Repeatable, auditable CI/CD |
+| Inputs | CLI flags + prompts | GitHub secrets/variables |
+| Topology | Same: one multi-container app | Same |
+| Frontend nginx | `nginx.azure.conf` via build arg | Same |
 
-Both produce the same Azure topology (ACR + Container Apps Environment + 2 Container Apps) and use the same Dockerfiles.
-
-## Differences from the original plan
-
-The plan's draft `deploy-ci.sh` had two defects that this implementation fixes:
-
-1. **Double frontend build.** The draft built the frontend image once *before* the backend FQDN was known, then a second time *after* rewriting `nginx.conf`. Only the second build is deployed. This implementation builds the frontend **once**, after the rewrite.
-2. **BSD `sed -i ''`.** The draft used `sed -i ''` (macOS syntax). GitHub runners are Ubuntu (GNU sed), where `sed -i ''` is interpreted as "in-place with an empty backup suffix" plus a literal `''` argument — breaking the rewrite. This implementation uses a portable temp-file + `mv`.
+Both use `scripts/containerapp.yaml.tpl` and produce the same Azure topology.
 
 ## Troubleshooting
 
-See [SETUP_CI_CD.md → Troubleshooting](./SETUP_CI_CD.md#troubleshooting) for the common failure modes and fixes.
+See [SETUP_CI_CD.md → Troubleshooting](./SETUP_CI_CD.md#troubleshooting) and [OAUTH_SETUP.md → Azure production](./OAUTH_SETUP.md#azure-production-github-actions--container-apps).
+
+Common issues after deploy:
+
+- **504 Gateway Timeout** — fixed by multi-container deploy (see AZURE_INTERNAL_INGRESS_ISSUE.md).
+- **401 on `/api/auth/me` before login** — expected when logged out.
+- **Google `invalid_client` / OAuth client not found** — `GOOGLE_CLIENT_ID` is wrong (often GitHub ID pasted by mistake); redeploy after fixing secrets.
+- **OAuth works at GitHub but session lost** — redeploy with `nginx.azure.conf` fix (`X-Forwarded-Proto: https`).
