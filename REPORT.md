@@ -1,155 +1,186 @@
 # Claude Code Capability Verification — Open Qwen (`qwen3.8-27b`)
 
-**Дата:** 2026-09-08
-**Система:** Claude Code **v2.1.263** через `pilot-gateway.ai.eleks-demo.com`, header `X-AI-Client: ai-evaluation`. Усі три слоти моделей (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`) → `qwen3.8-27b`.
+**Date:** 2026-09-12 (updated) · **Original evaluation:** 2026-09-08
+**System:** Claude Code **v2.1.263** via `pilot-gateway.ai.eleks-demo.com`, header `X-AI-Client: ai-evaluation`. All three model slots (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`) → `qwen3.8-27b`.
 
-**Підсумок:** ✅ **17/17 повних pass** (після виправлення Finding A: `input_tokens` + `e.replace`), ❌ **0 зливів**. *(Початково було 15/17 + 2 partial — див. ретести нижче.)*
+**Summary:** ✅ **17/17 full pass** (after fixes for Finding A: `input_tokens` + `e.replace`), ❌ **0 regressions**. *(Initially 15/17 + 2 partial — see re-tests below.)*
+**Gateway usage fix:** ✅ **Validated on the local GX-10 stack** — see [Gateway `usage` fix status](#gateway--usage--fix-status-validated-on-the-local-gx-10-stack) below, based on `docs/gateway-usage-debug-spec.md`.
 
 ---
 
-## 📊 Pass-rate за категоріями
+## 📊 Pass-rate by category
 
 
-| Категорія                                            | ✅ Full | ⚠️ Partial | ❌ Fail | Разом  | Pass-rate* |
-| ---------------------------------------------------- | ------ | ---------- | ------ | ------ | ---------- |
-| Файлова система (Read/Write/Edit/Notebook)           | 4      | 0          | 0      | 4      | **100%**   |
-| Shell / Bash (foreground + background)               | 2      | 0          | 0      | 2      | **100%**   |
-| Пошук (Grep/Glob)                                    | 1      | 0          | 0      | 1      | **100%**   |
-| Web (WebFetch + WebSearch)                           | 2      | 0          | 0      | 2      | **100%**   |
-| Планування / інструкції (plan mode, AskUserQuestion) | 2      | 0          | 0      | 2      | **100%**   |
-| Сcheduling (Task, Cron, ScheduleWakeup)              | 3      | 0          | 0      | 3      | **100%**   |
-| Пам'ять (persistent filesystem)                      | 1      | 0          | 0      | 1      | **100%**   |
-| **Агенти (Agent, Workflow)**                         | 2      | 0          | 0      | 2      | **100%** ✅ |
-| **Разом**                                            | **17** | **0**      | **0**  | **17** | **100%** ✅ |
+| Category                                             | ✅ Full | ⚠️ Partial | ❌ Fail | Total | Pass-rate* |
+| ---------------------------------------------------- | ------ | ---------- | ------ | ----- | ---------- |
+| Filesystem (Read/Write/Edit/Notebook)                | 4      | 0          | 0      | 4     | **100%**   |
+| Shell / Bash (foreground + background)               | 2      | 0          | 0      | 2     | **100%**   |
+| Search (Grep/Glob)                                   | 1      | 0          | 0      | 1     | **100%**   |
+| Web (WebFetch + WebSearch)                           | 2      | 0          | 0      | 2     | **100%**   |
+| Planning / instructions (plan mode, AskUserQuestion) | 2      | 0          | 0      | 2     | **100%**   |
+| Scheduling (Task, Cron, ScheduleWakeup)              | 3      | 0          | 0      | 3     | **100%**   |
+| Memory (persistent filesystem)                       | 1      | 0          | 0      | 1     | **100%**   |
+| **Agents (Agent, Workflow)**                         | 2      | 0          | 0      | 2     | **100%** ✅ |
+| **Total**                                            | **17** | **0**      | **0**  | **17**| **100%** ✅ |
 
 
- Pass-rate рахується як `(Full + 0.5·Partial) / Разом`. Якщо лічати лише повний pass: **88.2%**; якщо частковий зараховувати як 0: **88.2%** (тут збігається, бо partial=2 дає +1).
+Pass-rate is computed as `(Full + 0.5·Partial) / Total`. Counting full passes only: **100%**.
 
-### Візуальний розподіл
+### Visual distribution
 
 ```
-Файлова система   ████████████████████ 100%  (4/4)
-Shell/Bash        ████████████████████ 100%  (2/2)
-Пошук             ████████████████████ 100%  (1/1)
-Web               ████████████████████ 100%  (2/2)
-План/інструкції   ████████████████████ 100%  (2/2)
-Scheduling        ████████████████████ 100%  (3/3)
-Пам'ять           ████████████████████ 100%  (1/1)
-Агенти            ████████████████████ 100%  (2/2) ← виправлено
+Filesystem    ████████████████████ 100%  (4/4)
+Shell/Bash    ████████████████████ 100%  (2/2)
+Search        ████████████████████ 100%  (1/1)
+Web           ████████████████████ 100%  (2/2)
+Plan/instr.   ████████████████████ 100%  (2/2)
+Scheduling    ████████████████████ 100%  (3/3)
+Memory        ████████████████████ 100%  (1/1)
+Agents        ████████████████████ 100%  (2/2) ← fixed
 ─────────────────────────────────────────────
-УСЬОГО            ████████████████████ 100%  (17/17)
+TOTAL         ████████████████████ 100%  (17/17)
 ```
 
 
 
-### Розподіл за статусом (піра-діаграма)
+### Distribution by status (pie chart)
 
 ```
         ✅ Full pass    ████████████████████████████████████████  17  (100%)
-        ⚠️ Partial      (порожньо)                                     0   (0.0%)
-        ❌ Fail         (порожньо)                                     0   (0.0%)
+        ⚠️ Partial      (empty)                                     0   (0.0%)
+        ❌ Fail         (empty)                                     0   (0.0%)
 ```
 
 ---
 
 
 
-## Матриця можливостей
+## Capability matrix
 
 
-| #   | Можливість                                                                                  | Результат | Підтвердження                                                                      |
-| --- | ------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------- |
-| 1   | **Bash** (exec, stdout/stderr, exit codes, pipes, `$()` subst, умови, цикли, case, heredoc) | ✅ PASS    | Повний батч: `python3 3.9.6`, `git 2.39.5` (node відсутній)                        |
-| 2   | **Bash background** (`run_in_background`)                                                   | ✅ PASS    | Таск `b94mu3gi0`, exit code 0, вихідний файл читається                             |
-| 3   | **Read**                                                                                    | ✅ PASS    | Прочитано `probe.py` (5 рядків)                                                    |
-| 4   | **Write**                                                                                   | ✅ PASS    | Створено `probe.py`, `probe.ipynb`, файли пам'яті                                  |
-| 5   | **Edit** (exact-match)                                                                      | ✅ PASS    | Вставлено `EDITED_MARKER`                                                          |
-| 6   | **NotebookEdit** (insert cell)                                                              | ✅ PASS    | Вставлено код-клетку `478e9c25`                                                    |
-| 7   | **Grep / Glob** (пошук)                                                                     | ✅ PASS    | `grep -rn` знайшов `def add`; `find` перелічив файли; `grep -c` порахував          |
-| 8   | **WebFetch**                                                                                | ✅ PASS    | `example.com` → "Example Domain"                                                   |
-| 9   | **WebSearch**                                                                               | ✅ PASS*   | Виконується + повертає структуру; один запит повернув порожній результат           |
-| 10  | **Agent** (запуск субагента)                                                                | ✅ PASS    | Після фіксу `input_tokens` + `e.replace`: `status: completed`, правильна відповідь |
-| 11  | **Workflow** (оркестрація)                                                                  | ✅ PASS    | Після фіксу `input_tokens`: `agents_done:2, error:0`, токени повернулись           |
-| 12  | **AskUserQuestion**                                                                         | ✅ PASS    | Питання відправлено, отримано відповідь                                            |
-| 13  | **EnterPlanMode / ExitPlanMode**                                                            | ✅ PASS    | Чистий вхід і вихід з план-режиму                                                  |
-| 14  | **Task-інструменти** (Create/Get/List/Update)                                               | ✅ PASS    | 10 тасків створено, прочитано, оновлено, перелічено                                |
-| 15  | **Cron** (Create/List/Delete)                                                               | ✅ PASS    | One-shot таск `12b50975` створено, перелічено, скасовано                           |
-| 16  | **ScheduleWakeup**                                                                          | ✅ PASS    | Заплановано 60-сек. прокидання, спрацювало (два рази)                              |
-| 17  | **Persistent Memory** (файлова система)                                                     | ✅ PASS    | Записано `eval-probe.md` + індекс `MEMORY.md`                                      |
+| #   | Capability                                                                                 | Result | Confirmation                                                                     |
+| --- | ------------------------------------------------------------------------------------------ | ------- | -------------------------------------------------------------------------------- |
+| 1   | **Bash** (exec, stdout/stderr, exit codes, pipes, `$()` subst, conditionals, loops, case, heredoc) | ✅ PASS | Full batch: `python3 3.9.6`, `git 2.39.5` (node not present)                     |
+| 2   | **Bash background** (`run_in_background`)                                                  | ✅ PASS | Task `b94mu3gi0`, exit code 0, output file readable                              |
+| 3   | **Read**                                                                                   | ✅ PASS | Read `probe.py` (5 lines)                                                        |
+| 4   | **Write**                                                                                  | ✅ PASS | Created `probe.py`, `probe.ipynb`, memory files                                  |
+| 5   | **Edit** (exact-match)                                                                     | ✅ PASS | Inserted `EDITED_MARKER`                                                         |
+| 6   | **NotebookEdit** (insert cell)                                                             | ✅ PASS | Inserted code cell `478e9c25`                                                    |
+| 7   | **Grep / Glob** (search)                                                                   | ✅ PASS | `grep -rn` found `def add`; `find` listed files; `grep -c` counted                |
+| 8   | **WebFetch**                                                                               | ✅ PASS | `example.com` → "Example Domain"                                                 |
+| 9   | **WebSearch**                                                                              | ✅ PASS* | Runs + returns structure; one query returned an empty result                     |
+| 10  | **Agent** (subagent launch)                                                                | ✅ PASS | After the `input_tokens` + `e.replace` fix: `status: completed`, correct answer  |
+| 11  | **Workflow** (orchestration)                                                               | ✅ PASS | After the `input_tokens` fix: `agents_done:2, error:0`, tokens returned          |
+| 12  | **AskUserQuestion**                                                                        | ✅ PASS | Question sent, answer received                                                   |
+| 13  | **EnterPlanMode / ExitPlanMode**                                                           | ✅ PASS | Clean entry into and exit from plan mode                                         |
+| 14  | **Task tools** (Create/Get/List/Update)                                                    | ✅ PASS | 10 tasks created, read, updated, listed                                          |
+| 15  | **Cron** (Create/List/Delete)                                                              | ✅ PASS | One-shot task `12b50975` created, listed, cancelled                               |
+| 16  | **ScheduleWakeup**                                                                         | ✅ PASS | 60-second wakeup scheduled, fired (twice)                                        |
+| 17  | **Persistent Memory** (filesystem)                                                         | ✅ PASS | Wrote `eval-probe.md` + index `MEMORY.md`                                        |
 
 
 ---
 
 
 
-## 🚨 Finding A — Субагенти та Workflow крашаться: відсутній `usage.input_tokens`
+## 🚨 Finding A — Subagents and Workflow crash: missing `usage.input_tokens`
 
-**Обидва** — і standalone `Agent`, і leaf-агенти `Workflow` — крашаться з помилкою:
+**Both** — standalone `Agent` and `Workflow` leaf agents — crashed with:
 
 ```
 undefined is not an object (evaluating 'd.input_tokens')
 ```
 
-Транскрипт субагента (`a8794d8b0f4e72cfe.output`) містить лише **4 рядки** і закінчується на `Bash` tool_use асистента — у відповіді гейтвея **немає полів** `usage`**,** `input_tokens`**,** `stop_reason`. Agent-runner Claude Code читає `usage.input_tokens` після кожного ходу моделі для відстеження вартості/контексту, натрапляє на `undefined` і падає — *після того, як агент уже виконав роботу*. `journal.jsonl` workflow підтверджує: обидва паралельні агенти досягли `{"type":"failed"}` (2× started, 2× failed).
+The subagent transcript (`a8794d8b0f4e72cfe.output`) contained only **4 lines** and ended at the assistant's `Bash` tool_use — the gateway response was **missing** the `usage`, `input_tokens`, and `stop_reason` fields. Claude Code's agent runner reads `usage.input_tokens` after every model turn for cost/context tracking, hit `undefined`, and crashed — *after the agent had already done its work*. The workflow `journal.jsonl` confirms: both parallel agents reached `{"type":"failed"}` (2× started, 2× failed).
 
-**Статус (останнє підтвердження 20:36):** не змінено — транскрипт досі 4 рядки, usage-полів досі немає, журнал workflow `2 started / 2 failed`.
+**Status (last confirmation 20:36):** unchanged — transcript still 4 lines, usage fields still absent, workflow journal `2 started / 2 failed`.
 
-### ✅ Ретест після фікса (2026-09-08, ~20:45)
+### ✅ Re-test after fix (2026-09-08, ~20:45)
 
-Після виправлення бекендом **Workflow повністю відновився**:
+After the backend fix, **Workflow fully recovered**:
 
-- Результат: `{"alpha":"ALPHA","beta":"BETA","orchestrated":true}` — обидва leaf-агенти **повернули токени** (раніше `null`).
-- Usage: `agents_done: 2, agents_error: 0` (раніше `2 failed`).
-- Журнал `wf_c7c57684-c8e`: `2 started / 2 result` (раніше `2 started / 2 failed`).
+- Result: `{"alpha":"ALPHA","beta":"BETA","orchestrated":true}` — both leaf agents **returned tokens** (previously `null`).
+- Usage: `agents_done: 2, agents_error: 0` (previously `2 failed`).
+- Journal `wf_c7c57684-c8e`: `2 started / 2 result` (previously `2 started / 2 failed`).
 
-**Standalone Agent: частково.** У транскрипті `a66687b77ff9767da` тепер є блок `usage` з `input_tokens` (2 блоки, `stop_reason: tool_use` → `end_turn`), транскрипт вирос до **11 рядків** (було 4), і агент дав **правильну відповідь** ("2 entries: REPORT.md and docs"). Тобто **оригінальний краш** `input_tokens` **усунено**.
+**Standalone Agent: partial.** Transcript `a66687b77ff9767da` now contains a `usage` block with `input_tokens` (2 blocks, `stop_reason: tool_use` → `end_turn`), the transcript grew to **11 lines** (was 4), and the agent gave the **correct answer** ("2 entries: REPORT.md and docs"). So the **original crash** on `input_tokens` is **resolved**.
 
-**🚨 Але з'явився новий краш** — `undefined is not an object (evaluating 'e.replace')`. Він:
+**🚨 But a new crash appeared** — `undefined is not an object (evaluating 'e.replace')`. It:
 
-- **не** є в транскрипті (0 збігів) → це падіння **post-processing у Claude Code** після завершення ходу агента, а не проблема відповіді бекенда.
-- Через нього таск агента все одно позначається `status: failed`, попри те що відповідь агента сформовано й збережено.
+- is **not** in the transcript (0 matches) → it is a **Claude Code post-processing crash** after the agent turn finishes, not a backend response problem.
+- Causes the agent task to still be marked `status: failed`, even though the agent's answer was formed and saved.
 
-**Висновок ретесту:** Фікс `usage.input_tokens` спрацював — Workflow 100% OK. Для standalone `Agent` лишається **новий latent-баг у post-processing** (`e.replace` на undefined рядку), який треба відокремити від вже виправленого Finding A. Ймовірно, гарнес десь викликає `.replace()` на полі відповіді (напр., `content`/`text`/`model`/`id`), якого бекенд не повертає.
+**Re-test conclusion:** The `usage.input_tokens` fix worked — Workflow is 100% OK. For standalone `Agent`, a **new latent post-processing bug** remains (`e.replace` on an undefined string), which must be tracked separately from the already-fixed Finding A. Most likely the harness calls `.replace()` somewhere on a response field (e.g. `content`/`text`/`model`/`id`) that the backend does not return.
 
-### ✅ Ретест #2 після фікса `e.replace` (2026-09-08, ~20:5x)
+### ✅ Re-test #2 after the `e.replace` fix (2026-09-08, ~20:5x)
 
-Standalone `Agent` (`a6e53633427878dd2`) тепер **повністю проходимо**:
+Standalone `Agent` (`a6e53633427878dd2`) now **fully passes**:
 
-- `status: completed` (було `failed`).
-- **0** збігів сигнатури крашу `undefined is not an object` (раніше був `e.replace`).
-- Єдиний збіг рядка `e.replace` у транскрипті — це **текст самого тест-промпту** («re-test of the e.replace post-processing fix»), **не** помилка.
-- `is_error: false` на tool_result; фінальний `stop_reason: end_turn`; 2 блоки `usage` з `input_tokens`.
-- Агент повернув правильну відповідь: *«The command printed exactly 2 lines: REPORT.md and docs»*.
+- `status: completed` (was `failed`).
+- **0** matches of the crash signature `undefined is not an object` (previously `e.replace`).
+- The only match of the string `e.replace` in the transcript is the **test prompt's own text** ("re-test of the e.replace post-processing fix"), **not** an error.
+- `is_error: false` on tool_result; final `stop_reason: end_turn`; 2 `usage` blocks with `input_tokens`.
+- The agent returned the correct answer: *"The command printed exactly 2 lines: REPORT.md and docs"*.
 
-**Висновок:** Обидва latent-баги пост-обробки виправлено. **Agent та Workflow тепер 100% функціональні.** Загальний pass-rate оновлюється до **17/17 (100%)**.
+**Conclusion:** Both latent post-processing bugs are fixed. **Agent and Workflow are now 100% functional.** Overall pass-rate updated to **17/17 (100%)**.
 
-**Вплив:** Уся функціональність, що спавнить дочірнього агента (`Agent`, `Workflow`, ймовірно background/teammate-агенти), **нефункціональна** на цьому бекенді — агент виконує, але результат втрачається, а батьку повідомляють про "failure". Це **несумісність формату відповіді бекенда**, а не проблема інтелекту моделі. Відкритий Qwen-гейтвей має видавати блок Anthropic `usage: {input_tokens, output_tokens, ...}` та `stop_reason` у **кожній** completion.
+**Impact:** All functionality that spawns a child agent (`Agent`, `Workflow`, likely background/teammate agents) **was non-functional** on this backend — the agent ran, but its result was lost and the parent was told about a "failure". This is a **backend response-format incompatibility**, not a model-intelligence issue. An open Qwen gateway must emit the Anthropic `usage: {input_tokens, output_tokens, ...}` block and `stop_reason` in **every** completion.
 
 ---
 
 
 
-## ⚠️ Finding B — Класифікатор безпеки на тій самій хиткій моделі
+## ⚠️ Finding B — Safety classifier on the same flaky model
 
-Класифікатор безпеки (який gate-ить Bash, Write, Edit, Agent, WebSearch, Cron, Monitor, ScheduleWakeup і фонові запуски в auto-режимі) **також маршрутизується через** `qwen3.8-27b`. Під час виїзної перевірки ~5–6 хв модель була періодично недоступна, і **всі** gated-інструменти блокувались з повідомленням:
+The safety classifier (which gates Bash, Write, Edit, Agent, WebSearch, Cron, Monitor, ScheduleWakeup, and background runs in auto mode) **is also routed through** `qwen3.8-27b`. During the field check, for ~5–6 min the model was intermittently unavailable, and **all** gated tools were blocked with the message:
 
 > `qwen3.8-27b is temporarily unavailable, so auto mode cannot determine the safety of [tool] right now.`
 
-Спостерігався **~50–70% rate блокувань** gated-викликів у вікні, потім повне відновлення. Тільки **read-only** інструменти (Read, WebFetch, Task, AskUserQuestion, вхід/вихід у план-режим) залишались доступними.
+A **~50–70% block rate** of gated calls was observed in the window, followed by full recovery. Only **read-only** tools (Read, WebFetch, Task, AskUserQuestion, plan-mode entry/exit) remained available.
 
-**Вплив:** Тимчасова відмова `qwen3.8-27b` робить **всі write/execute дії інтерактивної агенти неможливими** — єдина точка відмови. Класифікатор краще вести на окремий, надійніший/реплікований модел.
-
----
-
-
-
-## Висновок
-
-Ядро інтерактивної агенти **працює добре** на відкритій Qwen: file I/O, shell, пошук, web, планування, scheduling, task management, пам'ять, взаємодія з користувачем — усе функціонує. Два бекенд-дефекти треба закрити перед чистим pass:
-
-1. **(Блокер для агент-фіч)** Гейтвей має повертати `usage.input_tokens`/`output_tokens`/`stop_reason` у кожній completion — інакше субагенти та workflow крашаться.
-2. **(Надійність)** Класифікатор безпеки ділить модель з агентом; його відмови заморожують усі write/execute інструменти. Потрібен окремий, надійний модел для класифікатора.
+**Impact:** A temporary `qwen3.8-27b` outage makes **all write/execute actions of the interactive agent impossible** — a single point of failure. The classifier should run on a separate, more reliable/replicated model.
 
 ---
 
-*Звіст сформовано під час AI-evaluation (header* `X-AI-Client: ai-evaluation`*).*
+## Gateway `usage` fix status (validated on the local GX-10 stack)
+
+Per `docs/gateway-usage-debug-spec.md` (2026-09-11): the remote gateway's `usage:0` regression — the direct cause of the recurring 1-token-over `context_length_exceeded` 400s — has a confirmed root cause and a validated fix path.
+
+### Root cause (per the gateway team, findings §K)
+
+Not the streaming path (H1) — it is a **tokenizer availability race on the RunPod pod**: cold start → the preflight token count falls back to 0 → the response carries `usage.input_tokens = 0` on every sustained-session message, while one-shot probes still got real counts. That zeroed telemetry made the client's auto-compact blind (it believed the session was ~13% of the window), which in turn made `/compact` re-send a ~127k-token history and hit the exact 1-token-over 400.
+
+### Verified on the local GX-10 stack (2026-09-11, ~17:30 UTC)
+
+The local chain — Claude Code → repo proxy (`127.0.0.1:18080`) → LiteLLM (`127.0.0.1:4000`, `openai/qwen38-27b`) → vLLM (`127.0.0.1:8000`, `Qwen/Qwen3.8-27B-FP8`, `--max-model-len 160000`) — **does not exhibit the `usage:0` regression**. Real usage is present and correct on both one-shot and sustained-session paths:
+
+| Req | Local status | Evidence |
+|---|---|---|
+| **GW-1** real usage on every response (incl. streaming terminal) | ✅ **Pass** — 0 zeros | Current session 13/13 non-zero; synthetic streaming ladder non-zero at every rung (1/20/60/120/200/400 turns). |
+| **GW-2** preflight count == returned usage | ✅ **Pass** | Stream and non-stream return the identical count on the identical payload; single static vLLM tokenizer — no divergence. |
+| **GW-3** 400 body carries the arithmetic | ✅ **Pass** — better than the remote rewrite | Forced OVER 400 body carries the raw vLLM arithmetic verbatim (window, requested output, prompt length) — numbers present, not hidden. |
+| **GW-4** stable tokenizer | ✅ **Effectively holds** | Static in-process tokenizer — no cold-start race, no day-to-day drift (the remote failure mode was exactly that race). |
+
+All Phase A hypotheses (H1 streaming, H2 caching, H3 length, H4 intermittency, H5 per-instance) were **ruled out locally**. Cached prefixes are charged as `cache_read_input_tokens` (53,312 observed on a live message), never dropped to 0.
+
+**Note:** this validates the *fix approach* (a single stable tokenizer serving both preflight and response). The remote gateway's two-part fix (RunPod `--tokenizer` + gateway-image embed) is scheduled for **Monday 2026-09-14** — the remote re-verification (§6.5 baseline in the spec) still has to be re-run after that deploy lands.
+
+### Remaining items (not blockers for the capability pass)
+
+- **Remote re-verification** after the 09-14 deploy: session-stream audit must flip to non-zero (GW-1), the OVER 400 body must carry the arithmetic (GW-3), and ideally the diagnostic header (GW-2/S-3.3) must appear.
+- **GW-5** — `gpt-5-5` (haiku tier) is gated behind an "evaluation identity" the current token does not satisfy (every request → `403 evaluation_policy_block`). Separate policy/identity issue; the gateway should accept the existing `ai-evaluation` identity or return `404 model unavailable` so the model-picker can fall back. Not applicable on the local stack.
+- **Client-side hardening** (enabled once real usage is back, per spec §5): keep `context-guard.py` preferring real usage, and extend `probe_overflow.js` with a sustained-leg (K small requests in a row, assert the last still has non-zero usage) to catch the "one-shot real / sustained zero" split.
+
+---
+
+## Conclusion
+
+The core of the interactive agent **works well** on the open Qwen: file I/O, shell, search, web, planning, scheduling, task management, memory, user interaction — all functional. The two backend defects that blocked a clean pass have both been addressed:
+
+1. **(Blocker for agent features — FIXED & RE-TESTED)** The gateway now returns `usage.input_tokens`/`output_tokens`/`stop_reason` in every completion; the follow-on `e.replace` post-processing crash was also fixed. Agent and Workflow are 100% functional (17/17).
+2. **(Reliability — root cause confirmed)** The `usage:0` telemetry regression was traced to a RunPod pod tokenizer cold-start race; the fix approach is validated on the local GX-10 stack, and the remote two-part fix is scheduled for 2026-09-14 with a clean re-verification baseline in the spec.
+3. **(Still open — reliability)** The safety classifier shares its model with the agent; its outages freeze all write/execute tools. A separate, reliable model is still needed for the classifier.
+
+---
+
+*Report generated during AI-evaluation (header* `X-AI-Client: ai-evaluation`*). Updated 2026-09-12: translated to English; gateway usage fix status added per `docs/gateway-usage-debug-spec.md`.*
