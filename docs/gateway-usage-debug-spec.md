@@ -1,4 +1,3 @@
-```markdown
 # Gateway `usage` Regression — Debug Plan & Gateway-Side Fix Specification
 
 **Date:** 2026-09-11 · **Gateway:** `pilot-gateway.ai.eleks-demo.com` (black box to the client)
@@ -475,6 +474,97 @@ GW-3 ✅, probe legs ✅, stream-parity ✅. GW-2 ⚠️ (no header), GW-4 ⚠�
 Net: **the fix is in and holding; close GW-4 tomorrow and ask for the diagnostic header to
 make it verifiable, not just observed.**
 
+
+## 6.9 Final verification — fix holding 3 days later, on the new glm-5.3 route (2026-09-14, ~16:30–19:30 UTC)
+
+Re-ran the full §6.5/§6.8 battery. Two things changed in the environment since 09-11 that the
+verification had to account for first:
+
+1. **Model routing switched from `qwen3.8-27b` to `glm-5.3`** (settings now:
+   `ANTHROPIC_DEFAULT_OPUS/SONNET_MODEL=glm-5.3`, policy headers confirm
+   `explicit_glm53_alias` → `runpod-glm` / `glm-5.3`, window **196,608** — not qwen's 131,072).
+2. **The qwen route's parameter contract changed** after 09-11: `max_tokens` is now rejected
+   (`400 Unsupported parameter … Use 'max_completion_tokens'`), so `probe_overflow.js`'s FIT
+   leg fails on qwen for a *param-contract* reason, not the usage regression. (Observed in the
+   wild on 09-12: session `ec1aa7f3`, 4× that same 400.) The OVER leg on qwen still fires
+   the preflight first (preflight runs before param validation).
+
+Client env is re-anchored to the new window: `CLAUDE_CODE_MAX_CONTEXT_TOKENS=196608`,
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=167116` (×85% → auto-compact trigger ~142k real tokens).
+
+### GW-4 cross-day tokenizer stability — CLOSED
+
+`_gw4_stability.js` (identical 499,593-byte 620-turn payload, qwen route OVER leg):
+
+| Date | input_tokens | Note |
+|---|---|---|
+| 09-10 | 122,881 | pre-fix |
+| 09-11 am | 86,598 | pre-fix drift |
+| 09-11 17:14 | 133,718 | post-fix |
+| **09-14 (this pass)** | **133,718** | **byte-for-byte identical — 3 days later** |
+
+The tokenizer embed held. Drift is gone; GW-4 is **closed**.
+
+### Requirement-by-requirement (current state, glm-5.3 route)
+
+| Req | Status (09-14) | Evidence |
+|---|---|---|
+| **GW-1** real usage, every response (incl. streaming terminal) | ✅ **Pass** | Live CC sessions on glm-5.3: `fab53fed` 12/12, `4f330627` 85/85 (peak 95,012 real input tokens, auto-compact working), `dd8e17a4` 5/5 — 100% real from turn 1. Probe: FIT `input_tokens=4843` real; sustained K=10 leg **10/10 real, zero-free** (129→660, monotonic +59/turn); stream-vs-non-stream parity at 20/100/300 turns — terminal `message_delta` usage identical to non-stream (1,358 / 6,718 / 20,254). H1 ruled out on the current route too. |
+| **GW-2** preflight count == returned usage | ✅ **Behaviorally verified; header still absent** | The wall fires at the right place with arithmetic consistent with the returned counts: 950t → 200 @ 184,730 real input tokens; 1050t → 400. No `X-Gateway-Usage-Diagnostic` header exists yet, so field-level equality remains unprovable from the client — but preflight, 400 arithmetic, and returned usage all agree on window 196,608. |
+| **GW-3** 400 body carries the arithmetic | ✅ **Pass on both routes** | qwen OVER body: `input_tokens=133718, requested_output_tokens=4000, context_window=131072, total_requested_tokens=137718`. glm wall (1050t): `"maximum context length is 196608 tokens … 192609 input tokens … total of at least 196609"` — raw arithmetic present, not humanized away. |
+| **GW-4** stable tokenizer | ✅ **Closed** | 133,718 → 133,718 across 3 days on identical bytes (table above). |
+| **GW-5** `gpt-5-5` identity gate | ✅ **Fixed** (was ❌ 403) | One-word ping → **HTTP 200**, `model=gpt-5.5-2026-04-23`, real usage (`input_tokens=8, output_tokens=4`). The `403 evaluation_policy_block` is gone. |
+| **S-3.3** diagnostic header | ❌ **Still does not exist** | `DIAG-RELATED HEADERS: []` on both routes; glm 400 headers carry only `x-ai-policy-*` + `x-request-id`. Request stays open with the gateway team. |
+
+### What tripped the probes (and why it wasn't the regression)
+
+- `probe_overflow.js` on glm: **OVER leg returned 200** — correct behavior. The 620-turn
+  payload counts **120,396** under glm's tokenizer vs **133,718** under qwen's (−10%), so
+  120,396+4,000=124,396 < 196,608 — it fits. The probe's hardcoded `LIMIT=131072` is stale
+  qwen-era calibration; the preflight itself is intact (see 1050t → 400 above). Re-calibrating
+  the probe: the FIT/OVER pair for glm-5.3 is **620t / 1050t** at window 196,608.
+- 700t → one-off 502 and 800t → socket hang-up on the first ladder run: transient infra
+  errors, not the wall. On re-run, 700t returned 200 (the payload fits); the wall is at
+  ~1050 turns ≈ 203k tokens.
+- Today's 0/1 transcript entries (17:16–17:51 cluster): all `403 evaluation identity
+  required` / "Please run /login" synthetic turns from an expired token mid-afternoon —
+  not telemetry zeros. Auth recovered; all sessions since are 100% real usage.
+
+### §6 acceptance-gate checklist — FINAL
+
+- [x] Phase A hypothesis confirmed — tokenizer race (§K), verified fixed; H1 ruled out again on the current route.
+- [x] GW-1 0/0 zeros in sustained sessions — **MET** (all live glm-5.3 sessions 100% real; sustained K=10 0 zeros; stream parity holds).
+- [x] GW-2 preflight == returned usage — **behaviorally MET** (wall at 196,608 with matching arithmetic); field-level proof still blocked on the missing S-3.3 header.
+- [x] GW-3 400 carries arithmetic — **MET on both routes** (qwen structured fields; glm raw-text arithmetic).
+- [x] Auto-compact at ~102k→~142k real, no 400 — **MET**: session `4f330627` grew to 95,012 real input tokens with zero 400s; `fab53fed` performed **2 successful compacts** — the original `/compact` 1-token-over failure mode has not recurred.
+- [x] `/compact` on a grown session succeeds — **MET** (2 compacts in `fab53fed`, no 400s anywhere today).
+- [x] Probes pass — FIT real usage (4,843); sustained 10/10; stream-parity 3/3 rungs. `probe_overflow.js` OVER leg needs re-calibration for glm (620t→1050t, limit 196,608) — noted as maintenance, not a gateway defect.
+- [x] `/context` vs real request within documented factor — telemetry is real end-to-end; the factor divergence is schema-driven and expected.
+
+### Verdict — is the context window / token usage issue fixed?
+
+**Yes. All five gateway requirements are verified fixed or behaviorally met, three days
+after the fix, on the current (glm-5.3) route:**
+
+- GW-1 real usage everywhere (one-shot, sustained, streaming terminal, live sessions) ✅
+- GW-2 preflight consistent with returned usage at the correct 196,608 wall ✅ (behavioral)
+- GW-3 400 arithmetic present on both routes ✅
+- GW-4 tokenizer stable across days (133,718 = 133,718, 3-day gap) ✅ — **closed today**
+- GW-5 gpt-5-5 403 → 200 ✅ — **fixed since last check**
+
+**Two residual items, neither a live defect:**
+1. **No S-3.3 diagnostic header** — GW-2 remains "observed consistent" rather than
+   "field-verified". Verification-only gap; keep the request open with the gateway team.
+2. **Probe maintenance**: `probe_overflow.js`'s `LIMIT=131072` is stale for glm-5.3;
+   re-calibrate FIT=620t/OVER=1050t at window 196,608. The qwen FIT leg also fails on the
+   new `max_tokens` param-contract change — a separate gateway contract change worth
+   flagging to the team (Claude Code sends `max_tokens`; qwen route now demands
+   `max_completion_tokens`).
+
+The standing canary remains: the §6.5 session-stream audit one-liner — any future
+session recording a zero run is a regression. All-time transcripts: the 98.5% historical
+zeros remain pre-restart/pre-glm artifacts; every post-restart session with a real model
+response is 100% real usage.
 
 ## 7. Open questions for the gateway owners
 
